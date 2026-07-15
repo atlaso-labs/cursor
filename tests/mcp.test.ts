@@ -51,9 +51,9 @@ const call = (name: string, args: any = {}) =>
 const payload = (resp: any) => JSON.parse(resp.result.content[0].text);
 
 describe("JSON-RPC handshake", () => {
-  test("initialize returns serverInfo 'atlaso' + tools capability", async () => {
+  test("initialize returns serverInfo 'Atlaso' + tools capability", async () => {
     const r = await handle({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05" } });
-    expect(r.result.serverInfo.name).toBe("atlaso");
+    expect(r.result.serverInfo.name).toBe("Atlaso");
     expect(r.result.capabilities.tools).toBeDefined();
     expect(r.result.protocolVersion).toBe("2024-11-05");
   });

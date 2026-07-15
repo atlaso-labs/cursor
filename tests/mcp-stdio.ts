@@ -67,7 +67,7 @@ function rpc(id: number, method: string, params?: any): Promise<any> {
 
 async function main() {
   const init = await rpc(1, "initialize", { protocolVersion: "2024-11-05" });
-  ok(init.result.serverInfo.name === "atlaso", "initialize → serverInfo.name === 'atlaso' over real stdio");
+  ok(init.result.serverInfo.name === "Atlaso", "initialize → serverInfo.name === 'Atlaso' over real stdio");
 
   const list = await rpc(2, "tools/list");
   ok(list.result.tools.length === 5, "tools/list → 5 tools over real stdio");
