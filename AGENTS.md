@@ -13,6 +13,12 @@ decisions, preferences, and gotchas, across sessions, projects, and devices.
 - **Capture** runs when a turn/session ends; the exchange is saved with secrets
   scrubbed and scope (personal vs project) inferred.
 
+## Deliberate control
+
+The `atlaso` MCP server exposes five tools — `recall`, `remember`, `forget`,
+`recent`, `status` — for when you want to act on purpose: `recall` before answering
+when past context would help, `remember` when the user asks to keep something.
+
 ## Keep high-signal memory clear
 
 Save-worthy: decisions and the reason behind them, stable preferences / working
