@@ -1,0 +1,17 @@
+{
+  "name": "atlaso",
+  "owner": {
+    "name": "Atlaso Labs",
+    "email": "hello@atlaso.ai"
+  },
+  "metadata": {
+    "description": "Long-term memory for your AI coding tools — Atlaso's official Cursor plugin."
+  },
+  "plugins": [
+    {
+      "name": "atlaso",
+      "source": ".",
+      "description": "Long-term memory for Cursor — recalls what you've decided and remembers what matters, across sessions, projects, and tools."
+    }
+  ]
+}
