@@ -12,7 +12,8 @@
  * ZERO model involvement. Online-first: with no token / not cloud-linked we skip.
  * Never breaks the session (always exits 0).
  */
-import { deposit, loadAuth, type DepositItem } from "../lib/atlaso";
+import { depositWithResults, loadAuth, type DepositItem } from "../lib/atlaso";
+import { markStatsSent, pendingCaptureStats, recordDepositResults, recordGate } from "../lib/capture_stats";
 import { buildContent, classifyScope, heuristicPolarity, scrub, shouldDeposit, turnKey } from "../lib/capture";
 import { resolveCredential } from "../lib/credential";
 import { online } from "../lib/entitlement";
@@ -40,7 +41,16 @@ async function depositTurn(payload: Record<string, any>): Promise<void> {
   if (!user && !asst) [user, asst] = lastExchangeFromFile(payload.transcript_path || "");
 
   // worth-keeping gate on the USER message only (matches the Python client).
-  if (!shouldDeposit(user)[0]) {
+  // The counter records EVERY evaluation (content-free); the turn's idempotency
+  // key dedupes the stop+sessionEnd double-fire (lab ruling 85a5c41b).
+  const scrubbedUser = scrub(user)[0];
+  const ws = pending?.ws || workspaceRoot(payload);
+  const scope = classifyScope(user);
+  const pk = projectKey(ws ?? undefined); // for the project tag AND the idempotency key
+  const dedupeKey = user ? turnKey(scrubbedUser, scope, scope === "project" ? pk : null) : null;
+  const [gateOk, gateReason] = shouldDeposit(user);
+  await recordGate(gateReason, { turnKey: dedupeKey });
+  if (!gateOk) {
     log("capture", "skip (gate)");
     return;
   }
@@ -58,15 +68,10 @@ async function depositTurn(payload: Record<string, any>): Promise<void> {
   }
 
   // scrub BOTH sides client-side so secrets never leave the machine.
-  const scrubbedUser = scrub(user)[0];
+  // (scrubbedUser / ws / scope / pk computed above, before the gate.)
   const content = buildContent(scrubbedUser, scrub(asst)[0]);
   if (!content) return;
 
-  // Project resolution prefers the workspace captured at prompt time (stashed),
-  // falling back to this payload's workspace_roots — both scope to the same repo.
-  const ws = pending?.ws || workspaceRoot(payload);
-  const scope = classifyScope(user);
-  const pk = projectKey(ws ?? undefined); // for the project tag AND the idempotency key
   const tags = ["cursor", "auto", `pol-hint:${heuristicPolarity(user)}`, `scope:${scope}`];
   if (scope === "project" && pk) tags.push(`project:${pk}`);
 
@@ -86,8 +91,14 @@ async function depositTurn(payload: Record<string, any>): Promise<void> {
     return;
   }
   try {
-    const saved = await deposit(cred, [item]);
-    log("capture", `saved=${saved} scope=${scope}`);
+    // Piggyback the content-free counters when they changed since last send.
+    const stats = pendingCaptureStats();
+    const { ok, results } = await depositWithResults(cred, [item], stats ?? undefined);
+    if (ok) {
+      if (stats) await markStatsSent(stats);
+      await recordDepositResults(results);
+    }
+    log("capture", `saved=${ok} scope=${scope}`);
   } catch (e) {
     log("capture", `error ${e}`);
   }

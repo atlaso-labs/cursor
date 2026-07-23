@@ -1,7 +1,7 @@
 {
   "name": "atlaso",
   "displayName": "Atlaso Memory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Long-term memory for Cursor — recalls what you've decided and remembers what matters, across sessions, projects, and tools.",
   "author": { "name": "Atlaso", "email": "hello@atlaso.ai" },
   "publisher": "Atlaso",

@@ -238,12 +238,26 @@ export async function recent(auth: Auth, limit = 8): Promise<RecallResult[]> {
   return Array.isArray(deposits) ? deposits : [];
 }
 
+/** Batch deposit returning the server's per-item verdicts (added/duplicate) —
+ *  the capture counters need them. `captureStats` is the ADDITIVE content-free
+ *  counter payload (old servers ignore it; items may be [] for a stats-only
+ *  flush, though the connectors currently only piggyback). */
+export async function depositWithResults(
+  auth: Auth,
+  items: DepositItem[],
+  captureStats?: unknown[],
+): Promise<{ ok: boolean; results: Array<{ client_id?: string; status?: string }> }> {
+  if (!items.length && !(captureStats && captureStats.length)) return { ok: false, results: [] };
+  const body: Record<string, unknown> = { items };
+  if (captureStats && captureStats.length) body.capture_stats = captureStats;
+  const data = await call(auth, "POST", "/v1/memories/batch", body, DEPOSIT_TIMEOUT_MS);
+  return { ok: !!data, results: Array.isArray(data?.results) ? data.results : [] };
+}
+
 /** Batch deposit (the server re-scrubs + runs the worth-keeping gate). The
  *  client_id is the server idempotency key, so a retry never duplicates. */
 export async function deposit(auth: Auth, items: DepositItem[]): Promise<boolean> {
-  if (!items.length) return false;
-  const data = await call(auth, "POST", "/v1/memories/batch", { items }, DEPOSIT_TIMEOUT_MS);
-  return !!data;
+  return (await depositWithResults(auth, items)).ok;
 }
 
 /** POST /v1/entitlement — this device's tool policy {active_tool, multi_tool,

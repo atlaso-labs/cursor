@@ -1,0 +1,36 @@
+[
+  {
+    "accepted": 1,
+    "attempts": 2,
+    "day": "2026-07-01",
+    "drops": {
+      "chatter": 1,
+      "empty": 1,
+      "system_turn": 1
+    },
+    "hours_active": 1,
+    "max_hour_attempts": 2
+  },
+  {
+    "accepted": 1,
+    "attempts": 1,
+    "day": "2026-07-02",
+    "drops": {
+      "duplicate": 1,
+      "too_long": 1,
+      "too_short": 1
+    },
+    "hours_active": 1,
+    "max_hour_attempts": 1
+  },
+  {
+    "accepted": 1,
+    "attempts": 2,
+    "day": "2026-07-03",
+    "drops": {
+      "duplicate": 2
+    },
+    "hours_active": 2,
+    "max_hour_attempts": 1
+  }
+]
