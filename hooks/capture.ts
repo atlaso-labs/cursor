@@ -19,7 +19,7 @@ import { resolveCredential } from "../lib/credential";
 import { online } from "../lib/entitlement";
 import { log } from "../lib/log";
 import { stashPrompt, stashResponse, takePending } from "../lib/pending";
-import { projectKey, workspaceRoot } from "../lib/project";
+import { projectResolution, workspaceRoot } from "../lib/project";
 import { parsePayload, readStdin } from "../lib/stdin";
 import { exchangeFromPayload, lastExchangeFromFile } from "../lib/transcript";
 
@@ -44,9 +44,23 @@ async function depositTurn(payload: Record<string, any>): Promise<void> {
   // The counter records EVERY evaluation (content-free); the turn's idempotency
   // key dedupes the stop+sessionEnd double-fire (lab ruling 85a5c41b).
   const scrubbedUser = scrub(user)[0];
-  const ws = pending?.ws || workspaceRoot(payload);
-  const scope = classifyScope(user);
-  const pk = projectKey(ws ?? undefined); // for the project tag AND the idempotency key
+  // Tri-state project attribution (mirrors the Python client core.py). Only when
+  // the heuristic scope is "project" do we resolve a key: 'ok' → tag the key;
+  // 'none' (root is $HOME etc.) → downgrade to personal; 'unknown' (garbage: the
+  // hook's vendored runtime, cache dir, or an all-garbage workspace chain) → keep
+  // scope:project but attach a bare "project-unknown" marker, NEVER a key.
+  let scope = classifyScope(user);
+  let pk: string | null = null; // the key to tag + fold into the idempotency key ('ok' only)
+  let projectUnknown = false;
+  if (scope === "project") {
+    const ws = pending?.ws || workspaceRoot(payload);
+    const { status, key } = ws
+      ? projectResolution(ws)
+      : { status: "unknown" as const, key: null }; // all-garbage chain → unknown
+    if (status === "none") scope = "personal";
+    else if (status === "unknown") projectUnknown = true;
+    else pk = key; // 'ok'
+  }
   const dedupeKey = user ? turnKey(scrubbedUser, scope, scope === "project" ? pk : null) : null;
   const [gateOk, gateReason] = shouldDeposit(user);
   await recordGate(gateReason, { turnKey: dedupeKey });
@@ -73,7 +87,8 @@ async function depositTurn(payload: Record<string, any>): Promise<void> {
   if (!content) return;
 
   const tags = ["cursor", "auto", `pol-hint:${heuristicPolarity(user)}`, `scope:${scope}`];
-  if (scope === "project" && pk) tags.push(`project:${pk}`);
+  if (projectUnknown) tags.push("project-unknown"); // unattributed → provenance marker, no key
+  if (pk) tags.push(`project:${pk}`);
 
   const item: DepositItem = {
     client_id: turnKey(scrubbedUser, scope, scope === "project" ? pk : null),

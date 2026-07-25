@@ -2,6 +2,21 @@
 
 All notable changes to the Atlaso Memory plugin for Cursor.
 
+## [0.1.2] — 2026-07-25
+
+### Fixed
+- **Per-project memory now works.** Captures were being filed under a fake
+  project derived from the plugin's own install folder, so project memories
+  could not be recalled in the project they came from. Project detection now
+  uses the workspace root from the hook event, and every candidate path is
+  checked — tool-install, cache, and `$HOME` directories can never be mistaken
+  for your project.
+- **Unattributable captures stay visible.** When the workspace can't be
+  determined, the memory is marked unattributed and remains recallable instead
+  of being silently hidden.
+- **Stable keys across spellings.** Project keys are now case- and
+  Unicode-normalized, so the same folder always resolves to the same project.
+
 ## [0.1.1] — 2026-07-24
 
 ### Added
