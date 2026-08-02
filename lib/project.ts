@@ -161,9 +161,23 @@ function gitOrigin(root: string): string | null {
  *  github.com/me/app. */
 function normalizeRemote(url: string): string {
   let u = url.trim();
-  u = u.replace(/^[a-zA-Z]+:\/\//, ""); // strip scheme
-  u = u.replace(/^[^@/]+@/, ""); // strip user@
-  u = u.replace(":", "/"); // scp-style host:path → host/path (first colon only)
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) {
+    try {
+      const parsed = new URL(u);
+      // A transport PORT is not repository identity. Previously the scheme was
+      // stripped and then the first colon became a path separator, so
+      // ssh://git@host:2222/group/repo turned into host/2222/group/repo — a
+      // different project key from the same repo cloned over https, silently
+      // splitting one project's memories in two. (Bugbot #157, "SSH ports break
+      // project keys".) Parsing properly drops the port and the userinfo.
+      u = `${parsed.hostname}${parsed.pathname}`;
+    } catch {
+      u = u.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "");
+    }
+  } else {
+    u = u.replace(/^[^@/]+@/, ""); // strip user@
+    u = u.replace(":", "/"); // scp-style host:path → host/path (first colon only)
+  }
   u = u.replace(/\.git$/, "");
   return u.replace(/^\/+|\/+$/g, "").toLowerCase();
 }
@@ -316,4 +330,76 @@ function candidateIsGarbage(candidate: string): boolean {
   } catch {
     return true;
   }
+}
+
+/** First entry of a workspace-folders list (editors pass these path-separated). */
+function firstWorkspaceFolder(v: string | undefined): string | null {
+  if (!v) return null;
+  const first = v.split(/[:;,]/).map((s) => s.trim()).filter(Boolean)[0];
+  return first || null;
+}
+
+/** Project key for the CURRENT process, resolved from the environment.
+ *
+ *  The MCP server is a standalone process — it gets no hook payload and its cwd is
+ *  wherever the editor happened to launch it, so `projectKey()` alone would key
+ *  memories to the wrong directory (or to none). Resolve the workspace from the env
+ *  the editor exports, then hand it to the tri-state resolver so an unattributable
+ *  root yields null rather than a junk key. */
+/** Tri-state resolution for the CURRENT process. `currentProjectKey()` collapses
+ *  'none' and 'unknown' to the same null, which is NOT the same thing: 'none' is a
+ *  trustworthy "this is genuinely not a project" ($HOME, the filesystem root) and
+ *  belongs in personal scope, while 'unknown' is "the measurement is garbage" and
+ *  must stay project-scoped but unattributed. Callers that act on the difference
+ *  must use this. (Bugbot #157, "Remember skips none-vs-unknown split".) */
+export function currentProjectResolution(): ProjectResolution {
+  // 'none' is a TRUSTWORTHY "this is genuinely not a project", and acting on it
+  // downgrades a memory to personal — visible in every repo forever. It may only
+  // come from a root the editor actually supplied. An MCP server launched without
+  // workspace env vars falls back to cwd, which is frequently $HOME, and $HOME
+  // resolves to 'none': trusting that would file project-specific facts as
+  // personal and follow the user across every repository. Auto-capture already
+  // maps a missing workspace to 'unknown'; this now matches it.
+  // (Bugbot #157, "Remember mis-tags personal scope", HIGH.)
+  const supplied = editorWorkspaceRoot();
+  if (!supplied) return { status: "unknown", key: null };
+  return projectResolution(supplied);
+}
+
+/** The workspace the EDITOR told us about, or null. Deliberately excludes any
+ *  cwd fallback: "the editor said this is the workspace" and "we guessed from the
+ *  process's working directory" are different claims, and only the first can be
+ *  trusted to mean anything. */
+function editorWorkspaceRoot(): string | null {
+  return (
+    process.env.CURSOR_PROJECT_DIR ||
+    process.env.CURSOR_WORKSPACE_ROOT ||
+    firstWorkspaceFolder(process.env.WORKSPACE_FOLDER_PATHS) ||
+    null
+  );
+}
+
+function currentRoot(): string {
+  return editorWorkspaceRoot() || process.env.PWD || process.cwd();
+}
+
+export function currentProjectKey(): string | null {
+  return projectKey(currentRoot());
+}
+
+/** Visibility for a RECALL RESULT, as opposed to a raw tag list.
+ *
+ *  Some server versions normalize scope into a top-level `scope` field instead of
+ *  leaving `scope:project` in tags. A caller that only inspects tags therefore
+ *  reads such a row as PERSONAL and shows it everywhere — a cross-project leak.
+ *  The MCP path had this right and the sessionStart hook did not, which is exactly
+ *  the kind of drift two copies of one predicate produce, so it lives here now and
+ *  both call it. (Bugbot #157, "Recall filter misses scope field".) */
+export function resultVisibleHere(
+  r: { scope?: string; tags?: string[] },
+  project: string | null,
+): boolean {
+  const tags = Array.isArray(r.tags) ? [...r.tags] : [];
+  if (r.scope === "project" && !tags.includes("scope:project")) tags.push("scope:project");
+  return visibleInProject(tags, project);
 }

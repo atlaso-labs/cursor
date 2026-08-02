@@ -6,7 +6,11 @@
  * endpoints over the global `fetch`. The engine stays on the server; this only
  * knows the URLs — the IP thin-client rule, in TypeScript.
  *
- * v1 is ONLINE-FIRST: no local cache / outbox / sync (deferred — see README).
+ * NO local RECALL cache — reads always go to the brain, keeping the ranking
+ * engine server-side (the IP thin-client rule). WRITES are durable: deposits go
+ * through lib/outbox.ts write-ahead and are retried by lib/drain.ts, so a
+ * timeout, 5xx, 429, WAF block or offline laptop can no longer silently lose a
+ * user's memory the way v1 did.
  * Every call is FAIL-OPEN (memory must never break a Cursor turn): callers get
  * `[]` / `false` on any error — never a throw. A REACHED-but-rejected token
  * (HTTP 401/403) is the one authoritative signal: we retire auth.json so the next
@@ -15,9 +19,10 @@
 import {
   closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { scrub } from "./capture";
 
 export interface Auth {
   server: string;
@@ -190,6 +195,32 @@ async function call(
   body: unknown,
   timeoutMs: number,
 ): Promise<any | null> {
+  return (await callDetailed(auth, method, path, body, timeoutMs)).data;
+}
+
+/** Outcome of one call, with enough detail for the outbox to classify a failure.
+ *  `call()` above collapses this to data-or-null for the many call sites that only
+ *  need "did it work"; the deposit path needs the WHY, because "retry forever",
+ *  "stop retrying", and "this will never succeed" are three different answers and
+ *  guessing wrong either loses a memory or wedges the queue. */
+export interface CallOutcome {
+  data: any | null;
+  /** HTTP status, or 0 when the request never produced a response (timeout,
+   *  DNS failure, connection reset, unparseable body). */
+  status: number;
+  /** True when the response positively identifies as OUR brain rather than an
+   *  edge/WAF page — the same marker that gates credential retirement. */
+  ours: boolean;
+  error?: string;
+}
+
+export async function callDetailed(
+  auth: Auth,
+  method: string,
+  path: string,
+  body: unknown,
+  timeoutMs: number,
+): Promise<CallOutcome> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -202,15 +233,24 @@ async function call(
       body: body ? JSON.stringify(body) : undefined,
       signal: ctrl.signal,
     });
+    const ours = res.headers?.get("x-atlaso-response") === "1";
     if (res.status === 401 || res.status === 403) {
       // Only OUR server's verdict may retire a credential — an edge/WAF block is not one.
-      if (res.headers?.get("x-atlaso-response") === "1") retireForAuth(auth);
-      return null;
+      if (ours) retireForAuth(auth);
+      return { data: null, status: res.status, ours };
     }
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null; // transport/timeout/parse — transient, leave credentials intact
+    if (!res.ok) return { data: null, status: res.status, ours };
+    try {
+      return { data: await res.json(), status: res.status, ours };
+    } catch {
+      // 2xx with an unreadable body: the write may well have landed. Report it as
+      // a transport-class failure so the caller RETRIES — the deposit is
+      // idempotent on client_id, so a retry cannot duplicate.
+      return { data: null, status: 0, ours, error: "unparseable body" };
+    }
+  } catch (e) {
+    // transport/timeout/abort — transient, leave credentials intact
+    return { data: null, status: 0, ours: false, error: String(e).slice(0, 200) };
   } finally {
     clearTimeout(timer);
   }
@@ -223,7 +263,11 @@ export async function recall(
   limit = 8,
   project?: string,
 ): Promise<RecallResult[]> {
-  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  // Explicit MCP queries are user/agent-controlled too. Scrub BEFORE building the
+  // URL so a pasted token cannot escape through the READ path while searching
+  // memory — the write path is not the only way a secret leaves the machine.
+  const safeQuery = scrub(query || "")[0];
+  const params = new URLSearchParams({ q: safeQuery, limit: String(limit) });
   if (project) params.set("project", project);
   const data = await call(auth, "GET", `/v1/recall?${params.toString()}`, null, RECALL_TIMEOUT_MS);
   const results = data?.results;
@@ -238,6 +282,37 @@ export async function recent(auth: Auth, limit = 8): Promise<RecallResult[]> {
   return Array.isArray(deposits) ? deposits : [];
 }
 
+export interface DepositOutcome {
+  ok: boolean;
+  results: Array<{ client_id?: string; status?: string }>;
+  /** Transport/HTTP detail so the outbox can decide retry vs quarantine. */
+  status: number;
+  ours: boolean;
+  error?: string;
+}
+
+/** Batch deposit exposing the full outcome. The outbox drain uses this; everything
+ *  that only cares "did it work" uses `depositWithResults` below. */
+export async function depositDetailed(
+  auth: Auth,
+  items: DepositItem[],
+  captureStats?: unknown[],
+): Promise<DepositOutcome> {
+  if (!items.length && !(captureStats && captureStats.length)) {
+    return { ok: false, results: [], status: 0, ours: false, error: "empty" };
+  }
+  const body: Record<string, unknown> = { items };
+  if (captureStats && captureStats.length) body.capture_stats = captureStats;
+  const out = await callDetailed(auth, "POST", "/v1/memories/batch", body, DEPOSIT_TIMEOUT_MS);
+  return {
+    ok: !!out.data,
+    results: Array.isArray(out.data?.results) ? out.data.results : [],
+    status: out.status,
+    ours: out.ours,
+    error: out.error,
+  };
+}
+
 /** Batch deposit returning the server's per-item verdicts (added/duplicate) —
  *  the capture counters need them. `captureStats` is the ADDITIVE content-free
  *  counter payload (old servers ignore it; items may be [] for a stats-only
@@ -247,11 +322,8 @@ export async function depositWithResults(
   items: DepositItem[],
   captureStats?: unknown[],
 ): Promise<{ ok: boolean; results: Array<{ client_id?: string; status?: string }> }> {
-  if (!items.length && !(captureStats && captureStats.length)) return { ok: false, results: [] };
-  const body: Record<string, unknown> = { items };
-  if (captureStats && captureStats.length) body.capture_stats = captureStats;
-  const data = await call(auth, "POST", "/v1/memories/batch", body, DEPOSIT_TIMEOUT_MS);
-  return { ok: !!data, results: Array.isArray(data?.results) ? data.results : [] };
+  const r = await depositDetailed(auth, items, captureStats);
+  return { ok: r.ok, results: r.results };
 }
 
 /** Batch deposit (the server re-scrubs + runs the worth-keeping gate). The
@@ -280,13 +352,35 @@ export async function claimToolCall(auth: Auth, tool: string): Promise<any | nul
 
 /** Deposit ONE memory the user explicitly asked to keep. Returns the server id
  *  (so a later `forget` can target it), or null on failure. */
-export async function remember(auth: Auth, text: string): Promise<string | null> {
-  const t = (text || "").trim();
+export interface RememberOptions {
+  text: string;
+  /** Extra tags (e.g. scope:project + project:<key>) so an explicit save is
+   *  scoped like an automatic capture instead of defaulting to personal —
+   *  otherwise repo-specific facts saved via MCP follow the user everywhere. */
+  tags?: string[];
+}
+
+export async function remember(auth: Auth, opts: RememberOptions): Promise<string | null> {
+  // SCRUB BEFORE SENDING. Auto-capture scrubs secrets on-device; this explicit path
+  // did not, so "remember my key is sk-..." shipped the key to the brain in clear —
+  // a hole in the on-device scrubbing guarantee, reachable from the MCP `remember`
+  // tool with arbitrary agent-supplied text. (Bugbot, cursor/plugins#157, HIGH.)
+  const t = scrub(opts.text || "")[0].trim();
   if (!t) return null;
-  const client_id = randomUUID().replace(/-/g, "");
+  // CONTENT-DERIVED idempotency key, not a random UUID. A random key meant a
+  // timeout AFTER the server committed looked like failure, and the retry minted a
+  // NEW key — so the same fact could be stored twice, or reported unsaved when it
+  // had landed. Auto-capture already derives its key from content; the explicit
+  // path is the higher-intent one and deserves it more, not less.
+  // (Bugbot #157, "Remember lacks durable idempotency".)
+  const client_id = createHash("sha256")
+    .update(`remember\u0000${t}\u0000${(opts.tags || []).slice().sort().join(",")}`)
+    .digest("hex")
+    .slice(0, 32);
+  const tags = [...new Set(["cursor", "manual", ...(opts.tags || [])])];
   const item: DepositItem = {
     client_id, text: t, polarity: "open", evidence_grade: "anecdotal",
-    scope_note: null, tags: ["cursor", "manual"],
+    scope_note: null, tags,
   };
   const data = await call(auth, "POST", "/v1/memories/batch", { items: [item] }, DEPOSIT_TIMEOUT_MS);
   if (!data) return null;

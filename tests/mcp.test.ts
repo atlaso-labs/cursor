@@ -83,10 +83,35 @@ describe("tools/call routes to the brain with the per-tool credential", () => {
   });
   test("remember posts a batch tagged for cursor and returns the new id", async () => {
     const out = payload(await call("remember", { text: "we deploy on Fridays" }));
-    expect(out).toEqual({ saved: true, id: "new1" });
+    expect(out.saved).toBe(true);
+    expect(out.id).toBe("new1");
+    expect(out.scope).toBeDefined(); // the caller is told how it was scoped
     const req = reqs.find((r) => r.path === "/v1/memories/batch")!;
     expect(req.body.items[0].tags).toContain("cursor");
     expect(req.auth).toBe("Bearer tool_token_cursor");
+  });
+
+  test("an unidentifiable project still SAVES — it never refuses the memory", async () => {
+    // classifyScope defaults to "project" and the MCP process often cannot name
+    // one. Refusing there meant a deliberate "remember this" routinely failed on
+    // the user's highest-intent memory. It must save, marked unattributed.
+    const out = payload(await call("remember", { text: "the api server times out after 30s" }));
+    expect(out.saved).toBe(true);
+    const req = reqs.filter((r) => r.path === "/v1/memories/batch").pop()!;
+    const tags: string[] = req.body.items[0].tags;
+    if (!tags.some((t) => t.startsWith("project:"))) {
+      expect(tags).toContain("project-unknown"); // provenance, never a junk key
+      expect(out.note).toContain("visible everywhere");
+    }
+  });
+
+  test("an explicit remember is idempotent on content, so a retry cannot duplicate", async () => {
+    const a = payload(await call("remember", { text: "same fact twice" }));
+    const b = payload(await call("remember", { text: "same fact twice" }));
+    const posts = reqs.filter((r) => r.path === "/v1/memories/batch");
+    const ids = posts.slice(-2).map((r) => r.body.items[0].client_id);
+    expect(ids[0]).toBe(ids[1]); // content-derived key, not a fresh UUID
+    expect(a.saved && b.saved).toBe(true);
   });
   test("recent lists newest-first deposits", async () => {
     const out = payload(await call("recent", { limit: 5 }));

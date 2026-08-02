@@ -33,14 +33,38 @@ export interface Pending {
   ts: number;
 }
 
+/** Content-free receipt for the most recently completed turn in a conversation.
+ *  It lets sessionEnd retry a stop deposit with the same attribution/idempotency key
+ *  without retaining user text or keeping the pending-turn file across turns. */
+export interface CompletedTurn {
+  user_hash: string;
+  client_id: string;
+  scope: string;
+  project: string | null;
+  ts: number;
+}
+
 function pendingDir(): string {
   return join(atlasoDir(), "cursor-pending");
 }
 
+function completedDir(): string {
+  return join(atlasoDir(), "cursor-completed");
+}
+
 /** A filesystem-safe file name for a conversation id (ids are UUIDs, but never trust). */
+function safeConversationId(convId: string): string {
+  return convId.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || "default";
+}
+
 function pendingPath(convId: string): string {
-  const safe = convId.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || "default";
+  const safe = safeConversationId(convId);
   return join(pendingDir(), `${safe}.json`);
+}
+
+function completedPath(convId: string): string {
+  const safe = safeConversationId(convId);
+  return join(completedDir(), `${safe}.json`);
 }
 
 function readPending(convId: string): Pending | null {
@@ -53,6 +77,12 @@ function readPending(convId: string): Pending | null {
     /* missing / unreadable → nothing pending */
   }
   return null;
+}
+
+/** Read the current turn without consuming it. Used by stop so an early failure
+ *  cannot erase the only copy before a completion receipt exists. */
+export function peekPending(convId: string): Pending | null {
+  return readPending(convId);
 }
 
 function writePending(convId: string, p: Pending): void {
@@ -88,23 +118,78 @@ export function stashResponse(convId: string, asst: string): void {
   writePending(convId, { ...prev, asst });
 }
 
-/** Read + DELETE the turn's stash (called by stop/sessionEnd to deposit). Also
- *  prunes abandoned stashes so the dir can't grow without bound. */
-export function takePending(convId: string): Pending | null {
-  prune();
-  const p = readPending(convId);
+/** Delete the current turn after its caller has made the durable handoff decision. */
+export function clearPending(convId: string): void {
   try {
     unlinkSync(pendingPath(convId));
   } catch {
-    /* already gone (e.g. stop + sessionEnd both firing) */
+    /* already gone */
   }
+  prune(pendingDir());
+}
+
+/** Read + DELETE the current turn's stash. Read before pruning: an end hook proves
+ *  this conversation is active even when a long-running turn exceeded STALE_MS. */
+export function takePending(convId: string): Pending | null {
+  const p = peekPending(convId);
+  clearPending(convId);
   return p;
 }
 
-/** Remove stashes older than STALE_MS (abandoned turns / crashed sessions). */
-function prune(): void {
+/** Save a content-free completion receipt. A later stop overwrites the prior receipt,
+ *  while a new prompt remains isolated in cursor-pending. */
+export function stashCompleted(convId: string, turn: CompletedTurn): boolean {
   try {
-    const dir = pendingDir();
+    const dir = completedDir();
+    mkdirSync(dir, { recursive: true });
+    const target = completedPath(convId);
+    const tmp = join(dir, `.${randomUUID()}.tmp`);
+    const fd = openSync(tmp, "wx", 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify(turn));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, target);
+    return true;
+  } catch {
+    /* best-effort — sessionEnd may fall back without a stable receipt */
+    return false;
+  }
+}
+
+/** Read + DELETE the latest completed-turn receipt for this conversation. */
+export function takeCompleted(convId: string): CompletedTurn | null {
+  let turn: CompletedTurn | null = null;
+  try {
+    const o = JSON.parse(readFileSync(completedPath(convId), "utf-8"));
+    if (o && typeof o === "object") {
+      turn = {
+        user_hash: String(o.user_hash || ""),
+        client_id: String(o.client_id || ""),
+        scope: String(o.scope || ""),
+        project: typeof o.project === "string" ? o.project : null,
+        ts: Number(o.ts || 0),
+      };
+    }
+  } catch {
+    /* missing / unreadable */
+  }
+  try {
+    unlinkSync(completedPath(convId));
+  } catch {
+    /* already gone */
+  }
+  prune(completedDir());
+  if (!turn || Date.now() - turn.ts > STALE_MS) return null;
+  if (!turn.user_hash || !turn.client_id || !turn.scope) return null;
+  return turn;
+}
+
+/** Remove JSON entries older than STALE_MS (abandoned turns / receipts). */
+function prune(dir: string): void {
+  try {
     const now = Date.now();
     for (const name of readdirSync(dir)) {
       if (!name.endsWith(".json")) continue;

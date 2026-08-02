@@ -1,8 +1,8 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterEach, afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { projectKey, projectResolution, scopeOf, visibleInProject, workspaceRoot } from "../lib/project";
+import { currentProjectResolution, resultVisibleHere, projectKey, projectResolution, scopeOf, visibleInProject, workspaceRoot } from "../lib/project";
 
 const roots: string[] = [];
 function tmproot(): string {
@@ -185,5 +185,75 @@ describe("scope precedence (CodeRedTeam crafted-tag inversions)", () => {
     expect(visibleInProject(["scope:orphaned", "scope:project", "project:secret"], "secret")).toBe(false);
     expect(scopeOf(["scope:project", "scope:personal"])[0]).toBe("project");
     expect(scopeOf(["scope:personal", "scope:orphaned"])[0]).toBe("orphaned");
+  });
+});
+
+// ── one visibility predicate, used by every recall path ─────────────────────
+// Two copies of this rule is how a cross-project leak got into the sessionStart
+// hook while the MCP path was correct. (Bugbot #157.)
+describe("resultVisibleHere", () => {
+  test("a row whose scope arrives in a FIELD, not tags, must not leak", () => {
+    // THE ACTUAL BUG: the project KEY is in tags but `scope:project` is not —
+    // some server versions normalize scope into its own field. Reading tags
+    // alone, _scope_of sees no scope:project and calls it PERSONAL, so another
+    // project's note lands in this project's rules file.
+    const row = { scope: "project", tags: ["cursor", "auto", "project:github.com/me/app"] };
+    expect(resultVisibleHere(row, "github.com/me/other")).toBe(false); // must NOT leak
+    expect(resultVisibleHere(row, "github.com/me/app")).toBe(true); // visible at home
+  });
+
+  test("a project row with NO key stays fail-open — visible, never silently buried", () => {
+    // Deliberate rule (server _visible_in_project agrees): an unattributable
+    // capture is shown with provenance rather than hidden, because hiding is
+    // invisible to the user and so can never be corrected.
+    const row = { scope: "project", tags: ["cursor", "auto"] };
+    expect(resultVisibleHere(row, "github.com/me/other")).toBe(true);
+  });
+
+  test("the same row is visible inside its own project when tagged", () => {
+    const row = { scope: "project", tags: ["scope:project", "project:github.com/me/app"] };
+    expect(resultVisibleHere(row, "github.com/me/app")).toBe(true);
+    expect(resultVisibleHere(row, "github.com/me/other")).toBe(false);
+  });
+
+  test("personal rows follow the user everywhere", () => {
+    expect(resultVisibleHere({ tags: ["scope:personal"] }, "github.com/me/app")).toBe(true);
+    expect(resultVisibleHere({ tags: [] }, "github.com/me/app")).toBe(true);
+  });
+
+  test("an unattributed project row is visible with provenance, never buried", () => {
+    const row = { tags: ["scope:project", "project-unknown"] };
+    expect(resultVisibleHere(row, "github.com/me/app")).toBe(true);
+  });
+
+  test("missing/odd shapes never throw", () => {
+    expect(() => resultVisibleHere({}, null)).not.toThrow();
+    expect(() => resultVisibleHere({ tags: undefined }, "x")).not.toThrow();
+  });
+});
+
+// ── 'none' must only ever come from an editor-supplied workspace ────────────
+// The MCP server falls back to cwd, which is often $HOME. $HOME resolves to
+// 'none', and 'none' downgrades a memory to personal — visible in every repo
+// forever. (Bugbot #157, "Remember mis-tags personal scope", HIGH.)
+describe("currentProjectResolution trusts only the editor's workspace", () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  test("no workspace env → 'unknown', never 'none', even when cwd is $HOME", () => {
+    delete process.env.CURSOR_PROJECT_DIR;
+    delete process.env.CURSOR_WORKSPACE_ROOT;
+    delete process.env.WORKSPACE_FOLDER_PATHS;
+    delete process.env.OPENCODE_PROJECT_DIR;
+    process.env.PWD = process.env.HOME || homedir();
+    expect(currentProjectResolution().status).toBe("unknown");
+  });
+
+  test("an editor-supplied $HOME is still a trustworthy 'none'", () => {
+    process.env.CURSOR_PROJECT_DIR = process.env.HOME || homedir();
+    process.env.OPENCODE_PROJECT_DIR = process.env.HOME || homedir();
+    expect(currentProjectResolution().status).toBe("none");
   });
 });

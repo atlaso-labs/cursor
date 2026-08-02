@@ -16,10 +16,12 @@
  * diagnostics go to the debug file (lib/log). One complete JSON object per line.
  */
 import { forget, health, loadAuth, recall, recent, remember } from "./atlaso";
+import { classifyScope } from "./capture";
 import { resolveCredential } from "./credential";
 import { cloudMode, online } from "./entitlement";
 import { REVOKED } from "./state";
 import { log } from "./log";
+import { currentProjectKey, currentProjectResolution, resultVisibleHere } from "./project";
 
 const NAME = "Atlaso";
 const VERSION = "0.1.0";
@@ -42,10 +44,17 @@ export const TOOLS = [
   {
     name: "remember",
     description:
-      "Save a durable fact, decision, preference, or gotcha to Atlaso memory so it persists across sessions, projects, and tools. Use for things worth keeping, not transient chatter.",
+      "Save a durable fact, decision, preference, or gotcha to Atlaso memory. Project facts stay in the current project; personal preferences remain available across projects. Use for things worth keeping, not transient chatter.",
     inputSchema: {
       type: "object",
-      properties: { text: { type: "string" } },
+      properties: {
+        text: { type: "string" },
+        scope: {
+          type: "string",
+          enum: ["personal", "project"],
+          description: "Optional override. Omit to infer personal vs project from the text.",
+        },
+      },
       required: ["text"],
     },
   },
@@ -78,6 +87,7 @@ export const TOOLS = [
 const NOT_LINKED =
   "Atlaso memory isn't linked on this device yet. Start a Cursor chat (the plugin links automatically) or run `atlaso connect`.";
 
+
 /** Run one tool. Gates on the SAME entitlement/tombstone check the hooks use
  *  (`online()`) BEFORE resolving a credential — otherwise a revoked or free-plan-
  *  gated tool could resurrect on the shared bearer through an MCP call (the hooks
@@ -89,8 +99,8 @@ export async function dispatch(name: string, args: any): Promise<any> {
   const deviceId = shared.device_id ?? null;
   // The verified-verdict gate: revoked → stay down (sticky); free-plan non-active →
   // local-only. Never resurrect a removed tool via the shared bearer.
-  if (!(await online(shared, TOOL, deviceId))) {
-    const mode = cloudMode(shared, TOOL, deviceId);
+  if (!(await online(shared, { tool: TOOL, deviceId: deviceId }))) {
+    const mode = cloudMode(shared, { tool: TOOL, deviceId: deviceId });
     return {
       error:
         mode.reason === REVOKED
@@ -100,16 +110,67 @@ export async function dispatch(name: string, args: any): Promise<any> {
   }
   const auth = await resolveCredential(TOOL);
   if (!auth) return { error: NOT_LINKED };
+  const project = currentProjectKey();
   switch (name) {
     case "recall": {
-      const results = await recall(auth, String(args?.query ?? ""), Number(args?.limit ?? 5));
-      return { results: results.map((r) => ({ id: r.id, content: r.content })) };
+      const limit = Math.max(1, Math.min(50, Number(args?.limit ?? 5) || 5));
+      const results = await recall(
+        auth,
+        String(args?.query ?? ""),
+        limit,
+        project ?? undefined,
+      );
+      return {
+        results: results
+          .filter((r) => resultVisibleHere(r, project))
+          .slice(0, limit)
+          .map((r) => ({ id: r.id, content: r.content })),
+      };
     }
-    case "recent":
-      return { memories: await recent(auth, Number(args?.limit ?? 10)) };
+    case "recent": {
+      const limit = Math.max(1, Math.min(50, Number(args?.limit ?? 10) || 10));
+      // `/v1/memories` is global/newest-first, so over-fetch before filtering or a
+      // run of foreign-project rows could crowd every visible memory out of the page.
+      const fetchLimit = Math.min(200, Math.max(limit * 4, 40));
+      const memories = (await recent(auth, fetchLimit))
+        .filter((r) => resultVisibleHere(r, project))
+        .slice(0, limit)
+        .map((r) => ({ id: r.id, content: r.content }));
+      return { memories };
+    }
     case "remember": {
-      const id = await remember(auth, String(args?.text ?? ""));
-      return id ? { saved: true, id } : { saved: false, error: "empty text, or the server was unreachable" };
+      const text = String(args?.text ?? "");
+      const requested = args?.scope === "personal" || args?.scope === "project"
+        ? args.scope
+        : null;
+      const scope = requested ?? classifyScope(text);
+      // NEVER refuse a deliberate save because we could not name the project.
+      // classifyScope defaults to "project", and this is a standalone MCP process
+      // with no hook payload and an arbitrary cwd, so currentProjectKey() is null
+      // more often than not — refusing meant "remember this" routinely failed on
+      // the user's highest-intent memory. Instead mark it unattributed and let it
+      // be visible everywhere: the server already treats a project-scoped row with
+      // no key as visible-with-provenance, which is the same fail-open rule
+      // auto-capture uses. Losing the scope is recoverable; losing the memory is
+      // not. (Bugbot #157, "Remember fails without project key".)
+      // 'none' and 'unknown' are NOT the same and must not be collapsed. A
+      // genuinely non-project root ($HOME) is real personal scope; a garbage
+      // measurement stays project-scoped but unattributed. Auto-capture already
+      // splits them, and claiming parity while collapsing them would be a lie.
+      let effScope = scope;
+      if (scope === "project" && !project && currentProjectResolution().status === "none") {
+        effScope = "personal";
+      }
+      const tags: string[] = [`scope:${effScope}`];
+      if (effScope === "project") {
+        if (project) tags.push(`project:${project}`);
+        else tags.push("project-unknown");
+      }
+      const id = await remember(auth, { text, tags });
+      if (!id) return { saved: false, error: "empty text, or the server was unreachable" };
+      return effScope === "project" && !project
+        ? { saved: true, id, scope: effScope, note: "saved without a project key — this project could not be identified, so the memory is visible everywhere" }
+        : { saved: true, id, scope: effScope };
     }
     case "forget": {
       const id = String(args?.id ?? "");
@@ -120,6 +181,7 @@ export async function dispatch(name: string, args: any): Promise<any> {
     }
     case "status": {
       const h = await health(auth);
+      if (!h) return { connected: false, error: "Atlaso memory is unreachable right now. Try again when connected." };
       return { connected: true, fmi: h?.fmi ?? null, total: h?.deposit_count ?? null };
     }
     default:
@@ -181,8 +243,21 @@ export async function handle(msg: any): Promise<any | null> {
   }
 }
 
+// Handlers may finish concurrently, but stdout is one byte stream. Serialize complete
+// frames (including backpressure) so large overlapping responses cannot interleave.
+let writeQueue: Promise<void> = Promise.resolve();
+function writeFrame(resp: any): Promise<void> {
+  const frame = JSON.stringify(resp) + "\n";
+  const write = () => new Promise<void>((resolve, reject) => {
+    process.stdout.write(frame, (err) => err ? reject(err) : resolve());
+  });
+  const task = writeQueue.then(write, write);
+  writeQueue = task.catch(() => {});
+  return task;
+}
+
 /** Read newline-delimited JSON-RPC from stdin, write responses to stdout. Handlers
- *  run concurrently (no head-of-line blocking); each write is one whole frame. */
+ *  run concurrently (no head-of-line blocking); frame writes are serialized. */
 async function main(): Promise<void> {
   const decoder = new TextDecoder();
   let buf = "";
@@ -205,11 +280,11 @@ async function main(): Promise<void> {
       // on each so EOF can drain them — otherwise the process could exit before the
       // last frame's reply is written.
       const p = handle(msg)
-        .then((resp) => {
-          if (resp) process.stdout.write(JSON.stringify(resp) + "\n");
+        .then(async (resp) => {
+          if (resp) await writeFrame(resp);
         })
         .catch((e) => {
-          if (msg?.id != null) process.stdout.write(JSON.stringify(rpcErr(msg.id, -32603, String(e))) + "\n");
+          if (msg?.id != null) return writeFrame(rpcErr(msg.id, -32603, String(e)));
         })
         .finally(() => inflight.delete(p));
       inflight.add(p);

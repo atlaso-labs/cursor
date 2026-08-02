@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deposit, loadAuth, recall, type Auth } from "../lib/atlaso";
+import { deposit, loadAuth, recall, remember, type Auth } from "../lib/atlaso";
+import { scrub } from "../lib/capture";
 
 const realFetch = globalThis.fetch;
 let tmp: string;
@@ -94,5 +95,62 @@ describe("recall / deposit (mocked fetch, fail-open)", () => {
   });
   test("deposit of an empty batch is a no-op", async () => {
     expect(await deposit(AUTH, [])).toBe(false);
+  });
+});
+
+// ── explicit remember must scrub on-device (Bugbot #157, HIGH severity) ──────
+// Auto-capture scrubbed; the explicit MCP `remember` tool did not, so an agent
+// could ship a secret to the brain in clear and the on-device scrubbing promise
+// was false on that path.
+describe("remember() scrubs secrets before they leave the machine", () => {
+  test("scrub() redacts a key that remember() would otherwise send raw", () => {
+    const secret = "my key is sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJ";
+    const [cleaned] = scrub(secret);
+    expect(cleaned).not.toContain("AAAABBBBCCCCDDDD");
+    expect(cleaned.length).toBeGreaterThan(0);
+  });
+
+  test("remember posts the SCRUBBED text, never the raw input", async () => {
+    let sent: any = null;
+    const srv = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        sent = await req.json();
+        return new Response(
+          JSON.stringify({ results: [{ client_id: sent.items[0].client_id, id: "dep1" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    try {
+      const auth = { server: `http://127.0.0.1:${srv.port}`, token: "t" } as any;
+      const raw = "token is ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII";
+      await remember(auth, { text: raw });
+      const posted = sent.items[0].text as string;
+      expect(posted).not.toBe(raw);
+      expect(posted).not.toContain("AAAABBBBCCCCDDDD");
+    } finally {
+      srv.stop(true);
+    }
+  });
+
+  test("a message with nothing secret survives intact", async () => {
+    let sent: any = null;
+    const srv = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        sent = await req.json();
+        return new Response(JSON.stringify({ results: [] }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    try {
+      const auth = { server: `http://127.0.0.1:${srv.port}`, token: "t" } as any;
+      await remember(auth, { text: "we decided to use pnpm instead of npm" });
+      expect(sent.items[0].text).toBe("we decided to use pnpm instead of npm");
+    } finally {
+      srv.stop(true);
+    }
   });
 });

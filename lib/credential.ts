@@ -28,11 +28,13 @@ const EXCHANGE_TIMEOUT_MS = 8000;
 
 /** A credential can't be attributed unless server + user + device all match the
  *  shared bearer — a reconnect into a different account must not reuse a stale
- *  tool file. Mirrors `_credential._same_identity`. */
+ *  tool file. A null device id is a valid legacy identity when BOTH files agree. */
 function sameIdentity(a: Auth, b: Auth): boolean {
   return (
-    !!a.server && !!a.user_id && !!a.device_id &&
-    a.server === b.server && a.user_id === b.user_id && a.device_id === b.device_id
+    !!a.server && !!a.user_id &&
+    a.server === b.server &&
+    a.user_id === b.user_id &&
+    (a.device_id ?? null) === (b.device_id ?? null)
   );
 }
 
@@ -57,7 +59,7 @@ async function exchange(shared: Auth, tool: string): Promise<ExchangeResult> {
     });
     const verified = res.headers?.get("x-atlaso-response") === "1";
     if (res.ok) {
-      const data = await res.json().catch(() => null);
+      const data = (await res.json().catch(() => null)) as { token?: unknown } | null;
       if (data && typeof data.token === "string" && data.token) return { kind: "minted", token: data.token };
       return { kind: "unverified" }; // 200 but no token → treat as transient, keep shared
     }

@@ -2,6 +2,34 @@
 
 All notable changes to the Atlaso Memory plugin for Cursor.
 
+## [0.2.0] — 2026-08-02
+
+### Added
+- **Your memories now survive a bad connection.** A memory used to be sent once,
+  and if anything went wrong — a timeout, a server hiccup, a dropped wifi
+  connection — it was gone, with nothing kept locally and nothing to tell you.
+  Every memory is now written to disk *before* it is sent and retried
+  automatically on a later turn. A memory is never silently lost; if one truly
+  cannot be delivered it is set aside with a reason rather than discarded.
+
+### Fixed
+- **Removing the plugin now really stops it, on Windows too.** On Windows the
+  plugin could not obtain its own credential, so it never learned it had been
+  removed and kept syncing.
+- **Secrets stay on your machine.** Saving a memory explicitly, and searching
+  your memory, are now scrubbed on-device like automatic capture already was.
+- **Memory stays in the right project.** Per-project filtering now applies to
+  the `recall` and `recent` tools, so one repository's notes no longer surface
+  in another. Repositories cloned over SSH with a custom port no longer split
+  into two separate projects.
+- **Saving a memory no longer fails when the project can't be identified.** It
+  is saved and marked instead of refused, and saving the same thing twice can no
+  longer create a duplicate.
+- `status` no longer reports "connected" when the server is unreachable.
+- Concurrent tool calls can no longer interleave and corrupt the MCP transport.
+- A preference that merely mentions a file path is no longer trapped in one repo.
+- A valid credential is no longer discarded and re-minted on every run.
+
 ## [0.1.2] — 2026-07-25
 
 ### Fixed

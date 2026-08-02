@@ -52,13 +52,18 @@ export function heuristicPolarity(userText: string): string {
 // ── scope router (personal/global vs project) ────────────────────────────────
 const PERSONAL =
   /\b(i (?:prefer|like|love|always|usually|tend to|never|hate|avoid)\b|my (?:favou?rite|preferred|default|usual|go-?to|style|setup|workflow)\b|for all my (?:projects|repos)\b|i'?m a .*?(?:person|developer|engineer)\b)/i;
+const EXPLICIT_PROJECT =
+  /\b(?:this (?:project|repo|codebase|app|service)|in this (?:repo|project))\b/i;
 const PROJECT =
-  /(?:\b(?:this (?:project|repo|codebase|app|service)|in this (?:repo|project)|the (?:server|database|db|api|endpoint|service|build|deploy(?:ment)?|schema)\b|localhost|127\.0\.0\.1|\b\d{1,3}(?:\.\d{1,3}){3}\b)|\/[\w.\-]+\/[\w./\-]+)/i;
+  /(?:\b(?:the (?:server|database|db|api|endpoint|service|build|deploy(?:ment)?|schema)\b|localhost|127\.0\.0\.1|\b\d{1,3}(?:\.\d{1,3}){3}\b)|\/[\w.\-]+\/[\w./\-]+)/i;
 
 export function classifyScope(userText: string): string {
   const t = userText || "";
-  if (PROJECT.test(t)) return "project";
+  // An explicit "this repo/project" phrase wins, but a generic path/API mention
+  // must not trap an otherwise clear personal preference in one repository.
+  if (EXPLICIT_PROJECT.test(t)) return "project";
   if (PERSONAL.test(t)) return "personal";
+  if (PROJECT.test(t)) return "project";
   return "project"; // default: contain locally rather than pollute global
 }
 
@@ -67,6 +72,14 @@ export function buildContent(userText: string, asstText: string): string {
   const a = (asstText || "").trim();
   if (a) content += `\n\n(assistant: ${a.slice(0, 400)})`;
   return content.trim();
+}
+
+/** Content-free fingerprint used to match a stop deposit with a later sessionEnd
+ *  fallback. Whitespace normalization tolerates transcript serialization differences
+ *  without persisting the user's message in the completion receipt. */
+export function messageKey(userMsg: string): string {
+  const normalized = (userMsg || "").trim().replace(/\s+/g, " ");
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 32);
 }
 
 /** Deterministic per-turn idempotency key (the deposit's client_id). Derived from the
