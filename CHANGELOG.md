@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.1] — 2026-09-21
+
+Preserve nearest-package identity while recognizing managed worktrees, rejecting untrusted directories, and retaining exact long project keys. This updates capture/recall identity; it does not add SessionStart Ambient delivery.
+
 All notable changes to the Atlaso Memory plugin for Cursor.
 
 ## [0.2.0] — 2026-08-02
@@ -75,3 +79,6 @@ Initial release.
 - **Global + per-project memory** — personal preferences stay global; project facts
   scope to the repo.
 - Usage **rule** and a memory-curation **skill**.
+
+## 0.2.1 (2026-09-21)
+- Project-aware Ambient Memory: scoped first-session context, enrichment lineage fixes. Qualified against emergence-lab a895cf5e (core a0a461ff).

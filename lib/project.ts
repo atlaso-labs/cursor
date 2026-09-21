@@ -12,7 +12,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, parse, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 
 const MARKERS = [
   ".git", "pyproject.toml", "package.json", "Cargo.toml", "go.mod",
@@ -46,7 +46,25 @@ function pathParts(p: string): Set<string> {
 function garbageRoot(root: string): boolean {
   try {
     const parts = pathParts(root);
-    if (intersects(parts, TOOL_DOT_DIRS)) return true;
+    const blocked = new Set([...parts].filter((part) => TOOL_DOT_DIRS.has(part)));
+    // Match Python: only proven managed worktrees exempt .claude/.codex.
+    // A nested plugin/cache directory must still fail the ancestry guard.
+    const sequence = root.split(/[/\\]+/).filter(Boolean);
+    for (const name of [".claude", ".codex"]) {
+      const positions = sequence.flatMap((part, i) => part === name ? [i] : []);
+      if (positions.length && positions.every((i) => {
+        if (sequence[i + 1] !== "worktrees") return false;
+        let ancestor = root;
+        while (ancestor.split(/[/\\]+/).filter(Boolean).length > i + 2) {
+          if (existsSync(join(ancestor, ".git"))) return true;
+          const parent = dirname(ancestor);
+          if (parent === ancestor) break;
+          ancestor = parent;
+        }
+        return false;
+      })) blocked.delete(name);
+    }
+    if (blocked.size) return true;
     // plugin caches that hide under non-dot dirs (marketplaces/cache/repos
     // layouts, e.g. "…/plugins/marketplaces/atlaso/atlaso/runtime")
     if (parts.has("plugins") && intersects(parts, ["cache", "marketplaces", "repos"])) return true;
@@ -83,27 +101,18 @@ function noProjectRoot(root: string): boolean {
 }
 
 export function projectRoot(start?: string): string {
-  let cur: string;
-  try {
-    cur = resolve(start || process.cwd());
-  } catch {
-    return process.cwd();
-  }
+  const cur = realpathSync(resolve(start || process.cwd()));
   let d = cur;
-  // walk up to the filesystem root looking for a project marker
   while (true) {
-    for (const m of MARKERS) {
-      try {
-        if (existsSync(join(d, m))) return d;
-      } catch {
-        /* ignore */
-      }
-    }
+    // Preserve existing package identities, and do not inherit a home dotfiles
+    // repository when the opened directory is below the home boundary.
+    if (noProjectRoot(d)) return cur;
+    if (MARKERS.some((m) => existsSync(join(d, m)))) return d;
     const parent = dirname(d);
     if (parent === d) break;
     d = parent;
   }
-  return cur; // no markers → the cwd itself is the "project"
+  return cur;
 }
 
 /** Read remote.origin.url straight from .git/config (no subprocess). Handles a
@@ -213,23 +222,28 @@ export interface ProjectResolution {
  *  memories became indistinguishable from "no project" and disappeared. */
 export function projectResolution(start?: string): ProjectResolution {
   try {
-    let root = projectRoot(start);
-    try {
-      root = realpathSync(root); // canonicalize BEFORE the garbage/none checks
-    } catch {
-      /* keep the path.resolve()'d root */
+    const supplied = start ?? process.cwd();
+    if (!isAbsolute(supplied) || !statSync(supplied).isDirectory()) {
+      return { status: "unknown", key: null };
     }
+    const current = realpathSync(supplied);
+    if (garbageRoot(current)) return { status: "unknown", key: null };
+    const root = projectRoot(current);
     if (garbageRoot(root)) return { status: "unknown", key: null };
     if (noProjectRoot(root)) return { status: "none", key: null };
     const origin = gitOrigin(root);
-    if (origin) {
-      const key = normalizeRemote(origin);
-      if (key) return { status: "ok", key: key.slice(0, 120) };
-    }
-    return { status: "ok", key: fallbackKey(root) };
+    const key = origin ? normalizeRemote(origin) : fallbackKey(root);
+    return validProjectKey(key) ? { status: "ok", key } : { status: "unknown", key: null };
   } catch {
     return { status: "unknown", key: null };
   }
+}
+
+/** Exact project identities match the shared Python client; never truncate. */
+function validProjectKey(key: string): boolean {
+  return key.length > 0 && [...key].length <= 512 && key === key.trim()
+    && !/[\s\x00-\x1f\x7f]/u.test(key)
+    && key !== "unknown" && key !== "project-unknown";
 }
 
 /** A stable identity for the current project. null → personal-only (both the
