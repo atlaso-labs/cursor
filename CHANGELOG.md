@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.2] — 2026-09-23
+
+New Atlaso logo: the plugin listing now shows the ten-dot mark on a black square. No behavior changes.
+
 ## [0.2.1] — 2026-09-21
 
 Preserve nearest-package identity while recognizing managed worktrees, rejecting untrusted directories, and retaining exact long project keys. This updates capture/recall identity; it does not add SessionStart Ambient delivery.
