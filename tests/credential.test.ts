@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { recall, toolAuthPath, type Auth } from "../lib/atlaso";
 import { resolveCredential } from "../lib/credential";
+import * as state from "../lib/state";
 
 const realFetch = globalThis.fetch;
 let tmp: string;
@@ -33,10 +34,12 @@ function writeTool(tool: string, cred: Record<string, unknown>) {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "atlaso-cred-"));
+  process.env.ATLASO_NO_BROWSER = "1";
   process.env.ATLASO_GLOBAL_PATH = tmp;
 });
 afterEach(() => {
   globalThis.fetch = realFetch;
+  delete process.env.ATLASO_NO_BROWSER;
   delete process.env.ATLASO_GLOBAL_PATH;
   rmSync(tmp, { recursive: true, force: true });
 });
@@ -107,13 +110,74 @@ describe("resolveCredential", () => {
     expect(existsSync(toolAuthPath("cursor"))).toBe(false);
   });
 
-  test("NOT-ENTITLED: a verified 409 → null (free plan, another tool owns the slot)", async () => {
+  test("NOT-ENTITLED: a verified tool_switch_needed → null (free plan, another tool owns the slot)", async () => {
     writeShared();
-    globalThis.fetch = (async () => res(409, {}, VERIFIED)) as any;
+    globalThis.fetch = (async () => res(409, {}, { ...VERIFIED, "x-atlaso-error": "tool_switch_needed" })) as any;
     const cred = await resolveCredential("cursor");
     expect(cred).toBeNull();
     expect(existsSync(toolAuthPath("cursor"))).toBe(false);
   });
+
+  const wireCases = [
+    {
+      name: "CAP",
+      status: 503,
+      error: "device_limit_reached",
+      credential: "shared",
+      reason: null,
+    },
+    {
+      name: "UNSELECTED",
+      status: 403,
+      error: "tool_switch_needed",
+      credential: null,
+      reason: state.NOT_ENTITLED,
+    },
+    {
+      name: "DISCONNECTED",
+      status: 409,
+      error: "tool_revoked",
+      credential: null,
+      reason: state.REVOKED,
+    },
+    {
+      name: "UNRESOLVED",
+      status: 409,
+      error: "plan_unresolved",
+      credential: "shared",
+      reason: null,
+    },
+  ] as const;
+
+  for (const cell of wireCases) {
+    test(`FOUR WIRE MEANINGS ${cell.name}: classify by header without retiring shared auth`, async () => {
+      writeShared();
+      globalThis.fetch = (async () =>
+        res(cell.status, { detail: `synthetic ${cell.name.toLowerCase()}` }, {
+          ...VERIFIED,
+          "x-atlaso-error": cell.error,
+        })) as any;
+
+      const credential = await resolveCredential("cursor");
+      expect(credential?.source ?? null, cell.name).toBe(cell.credential);
+      const verdict = state.get();
+      expect(verdict.reason, cell.name).toBe(cell.reason);
+      expect(existsSync(join(tmp, "auth.json")), `${cell.name} must not retire shared auth`).toBe(true);
+    });
+  }
+
+  for (const status of [403, 409, 503]) {
+    test(`STATUS COLLISION: a headerless verified ${status} is not assigned a wire meaning`, async () => {
+      writeShared();
+      globalThis.fetch = (async () =>
+        res(status, { detail: "synthetic unrelated refusal" }, VERIFIED)) as any;
+
+      const credential = await resolveCredential("cursor");
+      expect(credential).toMatchObject({ token: "shared_bearer", source: "shared" });
+      expect(state.get().reason).toBeNull();
+      expect(existsSync(join(tmp, "auth.json"))).toBe(true);
+    });
+  }
 });
 
 describe("tool-scoped retirement (via lib/atlaso call())", () => {

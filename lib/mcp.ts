@@ -61,7 +61,7 @@ export const TOOLS = [
   {
     name: "forget",
     description:
-      "Permanently delete a memory by its id (ids come from recall/recent). Destructive and not undoable — only when the user asks to forget something.",
+      "Forget a memory by its id (ids come from recall/recent): removes it from your memory everywhere Atlaso recalls or exports it. Only when the user asks to forget something.",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" } },

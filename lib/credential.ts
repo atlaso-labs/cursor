@@ -40,13 +40,41 @@ function sameIdentity(a: Auth, b: Auth): boolean {
 
 type ExchangeResult =
   | { kind: "minted"; token: string }
-  | { kind: "revoked" } // verified 403 tool_revoked — the user removed this tool
-  | { kind: "not_entitled" } // verified 409 — free plan, another tool owns the slot
+  | { kind: "revoked" }
+  | { kind: "not_entitled" }
   | { kind: "unverified" }; // network / edge / 5xx / 200-without-token — not a verdict
 
+type RefusalMeaning =
+  | "revoked"
+  | "unselected"
+  | "cap"
+  | "unresolved"
+  | "entitlement_required"
+  | "unknown";
+
+/** Status is deliberately absent: only our verified cause header carries meaning. */
+function refusalMeaning(cause: string): RefusalMeaning {
+  switch (cause) {
+    case "credential_revoked":
+    case "tool_revoked": // accepted while older brains drain
+      return "revoked";
+    case "not_entitled":
+    case "tool_switch_needed":
+      return "unselected";
+    case "device_limit_reached":
+      return "cap";
+    case "plan_unresolved":
+      return "unresolved";
+    case "entitlement_required":
+      return "entitlement_required";
+    default:
+      return "unknown";
+  }
+}
+
 /** Trade the shared bearer for this tool's own token. Only a 200-with-token mints;
- *  every unverified outcome returns `unverified` so the caller keeps the shared
- *  bearer. Verified 403 tool_revoked / 409 are the only offline-taking verdicts. */
+ *  every transient outcome keeps the shared bearer. Of the verified cause headers,
+ *  only revoked and unselected take this tool offline. */
 async function exchange(shared: Auth, tool: string): Promise<ExchangeResult> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), EXCHANGE_TIMEOUT_MS);
@@ -65,8 +93,11 @@ async function exchange(shared: Auth, tool: string): Promise<ExchangeResult> {
     }
     if (verified) {
       const err = res.headers?.get("x-atlaso-error") || "";
-      if (res.status === 403 && err === "tool_revoked") return { kind: "revoked" };
-      if (res.status === 409) return { kind: "not_entitled" };
+      const meaning = refusalMeaning(err);
+      if (meaning === "revoked") return { kind: "revoked" };
+      if (meaning === "unselected") return { kind: "not_entitled" };
+      // Cap, unresolved, missing-entitlement and unknown causes are retryable or
+      // cannot safely be interpreted here. Keep the credential and retry later.
       // A verified 401 means the SHARED bearer itself is dead — not this tool. Fall
       // back so the subsequent data-plane call retires the shared bearer (its job).
     }

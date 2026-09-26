@@ -43,6 +43,6 @@ act on purpose:
 
 - `recall <query>` — pull relevant past memory before answering (read-only).
 - `remember <text>` — save a durable fact the user asked to keep.
-- `forget <id>` — delete a memory by id (ids come from `recall`/`recent`); only when asked.
+- `forget <id>` — Removes it from your memory everywhere Atlaso recalls or exports it. You can't undo it. Ids come from `recall`/`recent`; only when asked.
 - `recent` — list the latest memories.
 - `status` — connected? how many memories, and the memory-health score.

@@ -75,6 +75,19 @@ describe("projectResolution — genuine no-project ('none')", () => {
       process.env.HOME = realHome;
       expect(projectResolution(realHome)).toEqual({ status: "none", key: null });
       expect(projectKey(realHome)).toBeNull();
+      // A home dotfiles repo must not absorb independent descendant projects.
+      mkdirp(join(realHome, ".git"));
+      writeFileSync(join(realHome, ".git/config"), '[remote "origin"]\nurl = https://github.com/me/dotfiles.git\n');
+      const privateApp = mkdirp(join(realHome, "projects/private-app"));
+      const otherApp = mkdirp(join(realHome, "projects/other-app"));
+      writeFileSync(join(privateApp, "package.json"), "{}");
+      writeFileSync(join(otherApp, "package.json"), "{}");
+      const privateKey = projectKey(privateApp);
+      expect(projectResolution(privateApp).status).toBe("ok");
+      expect(privateKey).toMatch(/^private-app-[0-9a-f]{8}$/);
+      expect(privateKey).not.toBe(projectKey(otherApp));
+      expect(visibleInProject(["scope:project", `project:${privateKey}`], projectKey(otherApp))).toBe(false);
+      expect(projectResolution(realHome)).toEqual({ status: "none", key: null });
     } finally {
       if (savedHome === undefined) delete process.env.HOME;
       else process.env.HOME = savedHome;
@@ -92,10 +105,11 @@ describe("projectResolution — .cursor/worktrees are REAL user repos ('ok')", (
 });
 
 describe("fallback key — NFC/NFD + case folding (APFS gives back NFD)", () => {
-  // Non-existent leaves under a real base: realpathSync throws, so the resolve()'d
-  // string reaches fallbackKey unchanged and only the NFC+lowercase folding acts.
+  // Use existing directories: unmeasured/missing paths must now stay unknown.
   test("NFC and NFD forms of the same name → identical key", () => {
     const base = tmproot();
+    mkdirp(join(base, "Café-proj"));
+    mkdirp(join(base, "Café-proj"));
     const nfd = projectResolution(join(base, "Café-proj")); // e + combining acute
     const nfc = projectResolution(join(base, "Café-proj")); //  é precomposed
     expect(nfd.status).toBe("ok");
@@ -103,6 +117,8 @@ describe("fallback key — NFC/NFD + case folding (APFS gives back NFD)", () => 
   });
   test("case-only difference → identical stable hash suffix", () => {
     const base = tmproot();
+    mkdirp(join(base, "café-proj"));
+    mkdirp(join(base, "CAFÉ-proj"));
     const lower = projectResolution(join(base, "café-proj"));
     const upper = projectResolution(join(base, "CAFÉ-proj"));
     expect(lower.key!.slice(-8)).toBe(upper.key!.slice(-8)); // hash basis is lowercased
@@ -255,5 +271,43 @@ describe("currentProjectResolution trusts only the editor's workspace", () => {
     process.env.CURSOR_PROJECT_DIR = process.env.HOME || homedir();
     process.env.OPENCODE_PROJECT_DIR = process.env.HOME || homedir();
     expect(currentProjectResolution().status).toBe("none");
+  });
+});
+
+
+describe("shared Python project identity parity", () => {
+  for (const owner of ["normal", ".claude", ".codex"]) {
+    test(`${owner}: packages retain their own identity without admitting nested caches`, () => {
+      const root = mkdirp(join(tmproot(), owner, "worktrees", "repo"));
+      mkdirp(join(root, ".git"));
+      writeFileSync(join(root, ".git/config"), '[remote "origin"]\nurl = https://github.com/synthetic/repo.git\n');
+      const pkg = mkdirp(join(root, "frontend"));
+      writeFileSync(join(pkg, "package.json"), "{}");
+      expect(projectKey(root)).toBe("github.com/synthetic/repo");
+      expect(projectKey(pkg)).toMatch(/^frontend-[0-9a-f]{8}$/);
+      expect(projectKey(pkg)).not.toBe(projectKey(root));
+      const cache = mkdirp(join(root, ".claude/plugins/runtime"));
+      writeFileSync(join(cache, "pyproject.toml"), "[project]");
+      expect(projectResolution(cache)).toEqual({ status: "unknown", key: null });
+      const child = mkdirp(join(root, "independent"));
+      mkdirp(join(child, ".git"));
+      writeFileSync(join(child, ".git/config"), '[remote "origin"]\nurl = https://github.com/synthetic/child.git\n');
+      expect(projectKey(child)).toBe("github.com/synthetic/child");
+    });
+  }
+  test("missing and relative directories remain unknown", () => {
+    expect(projectResolution(join(tmproot(), "missing"))).toEqual({ status: "unknown", key: null });
+    expect(projectResolution("relative")).toEqual({ status: "unknown", key: null });
+  });
+  test("long remote identities are exact and stay distinct", () => {
+    const keys = ["alpha", "beta"].map((suffix) => {
+      const root = tmproot();
+      mkdirp(join(root, ".git"));
+      const key = "github.com/synthetic/" + "a".repeat(140) + suffix;
+      writeFileSync(join(root, ".git/config"), `[remote "origin"]\nurl = https://${key}.git\n`);
+      expect(projectKey(root)).toBe(key);
+      return projectKey(root);
+    });
+    expect(keys[0]).not.toBe(keys[1]);
   });
 });

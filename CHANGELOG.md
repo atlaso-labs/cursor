@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.3] — 2026-09-26
+
+Forget copy. The `forget` MCP tool no longer says it permanently deletes a memory; its description now reads: "Forget a memory by its id (ids come from recall/recent): removes it from your memory everywhere Atlaso recalls or exports it. Only when the user asks to forget something." The memory skill now says what forget does and that you can’t undo it. No other behavior changes. Product bytes equal the lab-gated emergence-lab commit 0578e74ac (CodeRedTeam bfe4497e, carried by byte identity 972f474e; DXCritic c27cb73e).
+
 ## [0.2.2] — 2026-09-23
 
 New Atlaso logo: the plugin listing now shows the ten-dot mark on a black square. No behavior changes.
@@ -83,6 +87,3 @@ Initial release.
 - **Global + per-project memory** — personal preferences stay global; project facts
   scope to the repo.
 - Usage **rule** and a memory-curation **skill**.
-
-## 0.2.1 (2026-09-21)
-- Project-aware Ambient Memory: scoped first-session context, enrichment lineage fixes. Qualified against emergence-lab a895cf5e (core a0a461ff).
