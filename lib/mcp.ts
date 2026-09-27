@@ -16,6 +16,37 @@
  * diagnostics go to the debug file (lib/log). One complete JSON object per line.
  */
 import { forget, health, loadAuth, recall, recent, remember } from "./atlaso";
+
+/** The UTC calendar day ("2026-08-14") the user stated a note, or null when unknown.
+ *  `value` is the brain's statement time: `created_at` on a /v1/recall hit, `stated_at`
+ *  on a /v1/memories row (rung 85bcf262 B1 resolver). /v1/memories `created_at` is the
+ *  row's INSERTION time and is never passed here. Unknown or malformed stays null, so
+ *  a date is never manufactured; no offset means UTC. MIRROR of Python
+ *  atlaso_mcp.tools.stated_on; all mirrors are tested against
+ *  atlaso/platform/mcp/tests/stated_on_vectors.json. */
+const STATED_RE =
+  /^([1-9]\d{3})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(?:\d{3}|\d{6}))?)?(Z|[+-]\d{2}:\d{2})?$/;
+
+export function statedOn(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const m = STATED_RE.exec(value);
+  if (!m) return null;
+  const [y, mo, d, h, mi] = [m[1], m[2], m[3], m[4], m[5]].map(Number) as [number, number, number, number, number];
+  const s = Number(m[6] ?? "0");
+  if (mo < 1 || mo > 12 || h > 23 || mi > 59 || s > 59) return null;
+  const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+  if (d < 1 || d > daysInMonth) return null;
+  let offsetMin = 0;
+  const z = m[7];
+  if (z && z !== "Z") {
+    const oh = Number(z.slice(1, 3));
+    const om = Number(z.slice(4, 6));
+    if (oh > 23 || om > 59) return null;
+    offsetMin = (z[0] === "-" ? -1 : 1) * (oh * 60 + om);
+  }
+  return new Date(Date.UTC(y, mo - 1, d, h, mi, s) - offsetMin * 60_000).toISOString().slice(0, 10);
+}
+
 import { classifyScope } from "./capture";
 import { resolveCredential } from "./credential";
 import { cloudMode, online } from "./entitlement";
@@ -34,7 +65,7 @@ export const TOOLS = [
   {
     name: "recall",
     description:
-      "Search the user's Atlaso long-term memory for notes relevant to `query` — past decisions, preferences, conventions, project facts, gotchas. Call it before answering when prior context would help. Read-only.",
+      "Search the user's Atlaso long-term memory for notes relevant to `query` — past decisions, preferences, conventions, project facts, gotchas. Call it before answering when prior context would help. Each result has stated_on: the day the user stated it (YYYY-MM-DD), or null when unknown. Read-only.",
     inputSchema: {
       type: "object",
       properties: { query: { type: "string" }, limit: { type: "integer", default: 5 } },
@@ -70,7 +101,7 @@ export const TOOLS = [
   },
   {
     name: "recent",
-    description: "List the user's most recent memories (newest first). Read-only.",
+    description: "List memories by first-save time (newest saved first). `stated_on` is the user's latest statement day (YYYY-MM-DD), or null when unknown; repeating a note does not move it to the top. Read-only.",
     inputSchema: {
       type: "object",
       properties: { limit: { type: "integer", default: 10 } },
@@ -124,7 +155,7 @@ export async function dispatch(name: string, args: any): Promise<any> {
         results: results
           .filter((r) => resultVisibleHere(r, project))
           .slice(0, limit)
-          .map((r) => ({ id: r.id, content: r.content })),
+          .map((r) => ({ id: r.id, content: r.content, stated_on: statedOn(r.created_at) })),
       };
     }
     case "recent": {
@@ -135,7 +166,8 @@ export async function dispatch(name: string, args: any): Promise<any> {
       const memories = (await recent(auth, fetchLimit))
         .filter((r) => resultVisibleHere(r, project))
         .slice(0, limit)
-        .map((r) => ({ id: r.id, content: r.content }));
+        // stated_at, never created_at: a /v1/memories row's created_at is its insertion time.
+        .map((r) => ({ id: r.id, content: r.content, stated_on: statedOn(r.stated_at) }));
       return { memories };
     }
     case "remember": {

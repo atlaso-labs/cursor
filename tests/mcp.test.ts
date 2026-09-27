@@ -21,8 +21,9 @@ const server = Bun.serve({
     reqs.push({ path: url.pathname, method: req.method, auth: req.headers.get("authorization") || "", body });
     const j = (o: any, s = 200) => new Response(JSON.stringify(o), { status: s, headers: VERIFIED });
     if (url.pathname === "/v1/entitlement") return j({ multi_tool: true, active_tool: null, needs_reconnect: false });
-    if (url.pathname === "/v1/recall") return j({ results: [{ id: "m1", content: "use pnpm not npm" }] });
-    if (url.pathname === "/v1/memories" && req.method === "GET") return j({ deposits: [{ id: "m9", content: "recent one" }] });
+    if (url.pathname === "/v1/recall") return j({ results: [{ id: "m1", content: "use pnpm not npm", created_at: "2026-09-01T10:00:00+00:00" }] });
+    // created_at = INSERTION time (an L2 rewrite day); stated_at = when the user said it
+    if (url.pathname === "/v1/memories" && req.method === "GET") return j({ deposits: [{ id: "m9", content: "recent one", created_at: "2026-09-25T03:00:00+00:00", stated_at: "2026-08-01T10:00:00+00:00" }] });
     if (url.pathname === "/v1/memories/batch") return j({ results: [{ client_id: body.items[0].client_id, status: "added", id: "new1" }] });
     if (url.pathname.startsWith("/v1/memories/") && req.method === "DELETE") return j({ ok: true });
     if (url.pathname === "/v1/health") return j({ fmi: 72, deposit_count: 128 });
@@ -77,7 +78,7 @@ describe("JSON-RPC handshake", () => {
 describe("tools/call routes to the brain with the per-tool credential", () => {
   test("recall hits /v1/recall as the cursor token and returns id+content", async () => {
     const out = payload(await call("recall", { query: "package manager" }));
-    expect(out.results[0]).toEqual({ id: "m1", content: "use pnpm not npm" });
+    expect(out.results[0]).toEqual({ id: "m1", content: "use pnpm not npm", stated_on: "2026-09-01" });
     const req = reqs.find((r) => r.path === "/v1/recall")!;
     expect(req.auth).toBe("Bearer tool_token_cursor");
   });
@@ -116,6 +117,8 @@ describe("tools/call routes to the brain with the per-tool credential", () => {
   test("recent lists newest-first deposits", async () => {
     const out = payload(await call("recent", { limit: 5 }));
     expect(out.memories[0].id).toBe("m9");
+    // dated by when the user stated it, never by the row's insertion time
+    expect(out.memories[0]).toEqual({ id: "m9", content: "recent one", stated_on: "2026-08-01" });
   });
   test("forget deletes by id", async () => {
     const out = payload(await call("forget", { id: "m1" }));

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.4] - 2026-09-26
+
+Dated recall lines. Each note in the injected memory block now starts with the latest UTC day you stated it, for example `- [Aug 14] use bun`. A note rewritten later by server-side enrichment keeps the day of the statement it restates, not the rewrite day. A note whose day is unknown shows no date and is listed first. Notes queued offline are sent with the time they were captured. Against a brain that does not return dates, lines stay undated.
+
+In one synthetic bench run using the shared Python renderer, dates changed newest-decision accuracy from 117/150 to 126/150 for gpt-4.1-mini and from 131/150 to 132/150 for DeepSeek V4.1 Flash; Cursor and OpenCode date rendering was unit-tested, not measured in that run. On the other 244 recall questions the net change was +2 and +1. The same notes were injected with and without dates; only the dates differed. This is one run per reader, not a statistical certification.
+
+Dated MCP results. The `recall` and `recent` memory tools now return `stated_on`, the day the user stated each note (YYYY-MM-DD), or null when that is unknown. It is the same day the injected block shows, never the day a note was stored, imported, synced or rewritten, and `recent` no longer returns the storage time. Covered by unit tests, not by the bench.
+
+One memory skill. The judgment part of the memory skill is now one shared text, byte-identical in all seven Atlaso tools and checked by a parity test. It says to save a changed decision as a change that names both values and the reason and keep the old note, to forget only a memory that was never true, to name a return to an earlier choice as a change, and never to re-save something that was only read from memory. It adds a rule for reading notes that disagree: in the same scope the most recently stated note is current, an undated note is not newer, and when neither is clearly newer the model asks you. The forget wording from the previous release is kept. Not measured by the bench.
+
 ## [0.2.3] — 2026-09-26
 
 Forget copy. The `forget` MCP tool no longer says it permanently deletes a memory; its description now reads: "Forget a memory by its id (ids come from recall/recent): removes it from your memory everywhere Atlaso recalls or exports it. Only when the user asks to forget something." The memory skill now says what forget does and that you can’t undo it. No other behavior changes. Product bytes equal the lab-gated emergence-lab commit 0578e74ac (CodeRedTeam bfe4497e, carried by byte identity 972f474e; DXCritic c27cb73e).

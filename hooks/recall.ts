@@ -54,7 +54,9 @@ async function gather(auth: Auth, project: string | undefined): Promise<RecallRe
       // leak into another project's rules file.
       if (!resultVisibleHere(r, project ?? null)) continue;
       if (r.scope === undefined) r.scope = scopeOf(r.tags)[0]; // for the [scope] suffix
-      add(r);
+      // /v1/memories created_at is the row's INSERTION time (an L2 rewrite's is its
+      // rewrite day), not when the note was said: render these lines undated.
+      add({ ...r, created_at: null });
       if (out.length >= LIMIT) break;
     }
   }

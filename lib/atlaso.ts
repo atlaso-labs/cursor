@@ -44,6 +44,12 @@ export interface RecallResult {
   has_disagreement?: boolean;
   conflict_peers?: unknown[];
   tags?: string[];
+  /** ISO-8601 UTC; absent on older brains (rung 85bcf262 card B1). On a /v1/recall
+   *  hit it is the statement time; on a /v1/memories row it is the INSERTION time. */
+  created_at?: string | null;
+  /** /v1/memories only: when the user stated the note (ISO-8601 UTC), null when
+   *  unknown, absent on older brains. */
+  stated_at?: string | null;
 }
 
 export interface DepositItem {
@@ -53,6 +59,8 @@ export interface DepositItem {
   evidence_grade: string;
   scope_note: string | null;
   tags: string[];
+  /** ISO-8601 UTC capture time; set only for a queued (delayed) push. */
+  captured_at?: string;
 }
 
 const RECALL_TIMEOUT_MS = 8000;

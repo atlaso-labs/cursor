@@ -36,7 +36,7 @@
  *  A drain NEVER throws. It is called from editor hooks; a memory is worth less
  *  than the user's session.
  */
-import { depositDetailed, type Auth } from "./atlaso";
+import { depositDetailed, type Auth, type DepositItem } from "./atlaso";
 import { log } from "./log";
 import {
   maxDrainPerRun,
@@ -91,6 +91,14 @@ function classifyRequest(status: number): { retry: boolean; stop: boolean; why: 
  *  always uses the default. */
 export type DepositFn = typeof depositDetailed;
 
+/** The item as pushed: stamped with its capture time (the outbox enqueue time) so
+ *  a delayed push is dated by when it was captured, not by server receipt. */
+export function timedItem(rec: OutboxRecord): DepositItem {
+  const at = rec.enqueued_at;
+  if (typeof at !== "number" || !Number.isFinite(at) || at <= 0) return rec.item;
+  return { ...rec.item, captured_at: new Date(at).toISOString() };
+}
+
 export async function drain(
   tool: string,
   auth: Auth,
@@ -107,7 +115,7 @@ export async function drain(
       out.attempted++;
       let res: Awaited<ReturnType<DepositFn>>;
       try {
-        res = await deposit(auth, [rec.item]);
+        res = await deposit(auth, [timedItem(rec)]);
       } catch (e) {
         // depositDetailed already swallows transport errors; this is belt-and-braces
         // so an unexpected throw can never abort the loop and strand the rest.
