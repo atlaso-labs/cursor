@@ -212,7 +212,7 @@ describe("resultVisibleHere", () => {
     // THE ACTUAL BUG: the project KEY is in tags but `scope:project` is not —
     // some server versions normalize scope into its own field. Reading tags
     // alone, _scope_of sees no scope:project and calls it PERSONAL, so another
-    // project's note lands in this project's rules file.
+    // project's note lands in this project's recalled block.
     const row = { scope: "project", tags: ["cursor", "auto", "project:github.com/me/app"] };
     expect(resultVisibleHere(row, "github.com/me/other")).toBe(false); // must NOT leak
     expect(resultVisibleHere(row, "github.com/me/app")).toBe(true); // visible at home

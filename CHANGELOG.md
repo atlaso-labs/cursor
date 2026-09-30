@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.5] - 2026-09-30
+
+Security fixes (batch B1). A saved note can no longer add lines to the recalled memory block or fake the start or end of the memory block, and invisible control, zero-width and bidirectional-override characters are removed from recalled notes. Ordinary notes print exactly as before, tabs and emoji included; a note with Windows (CRLF) line endings no longer carries a stray carriage return.
+
+Recall no longer writes your notes into the workspace. The sessionStart hook returns the recalled block as session context, capped at 9,000 characters, and writes nothing into the workspace. Newly recalled notes are returned as session context; if an older `.cursor/rules/atlaso-recall.mdc` remains, delete it with write access before copying or staging this folder. The old `.cursor/rules/atlaso-recall.mdc` (and any `atlaso-notice.mdc`) that Atlaso wrote is removed at the start of the first chat: the plugin removes the old private rules file first, before contacting Atlaso; in a read-only folder it cannot, and the file stays until you delete it with write access. A file of that name without Atlaso's header is kept. When `.cursor` or `.cursor/rules` is a symbolic link, the old file is deleted only if the link leads to a folder inside the workspace; if it leads outside, nothing there is touched and you are told the command to remove it. If Cursor drops the Atlaso Memory block, recall depends on the agent calling the `recall` tool when past context helps; automatic recall for that IDE path has not been verified.
+
 ## [0.2.4] - 2026-09-26
 
 Dated recall lines. Each note in the injected memory block now starts with the latest UTC day you stated it, for example `- [Aug 14] use bun`. A note rewritten later by server-side enrichment keeps the day of the statement it restates, not the rewrite day. A note whose day is unknown shows no date and is listed first. Notes queued offline are sent with the time they were captured. Against a brain that does not return dates, lines stay undated.

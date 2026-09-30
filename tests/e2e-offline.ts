@@ -2,7 +2,7 @@
  * Offline end-to-end harness — drives the REAL hook scripts (hooks/recall.ts,
  * hooks/capture.ts) exactly as Cursor invokes them (JSON on stdin, per event),
  * against a FAKE brain. Proves the whole loop is wired: device connect → per-tool
- * credential MINT → recall injection → per-turn capture assembly → deposit with the
+ * credential MINT → recall injection (additional_context) → per-turn capture assembly → deposit with the
  * tool's OWN credential. Unit tests cover the pieces; this covers the seams.
  *
  * Run:  bun run tests/e2e-offline.ts   (exit 0 = all assertions pass)
@@ -67,27 +67,30 @@ const env = {
 };
 
 /** Run a hook script with a payload on stdin, like Cursor does. */
-async function runHook(script: string, payload: any): Promise<void> {
+async function runHook(script: string, payload: any): Promise<string> {
   const proc = Bun.spawn(["bun", "run", join(HOOKS, script)], {
     stdin: new TextEncoder().encode(JSON.stringify(payload)),
     stdout: "pipe", stderr: "pipe", env,
   });
+  const out = await new Response(proc.stdout).text();
   await proc.exited;
+  return out;
 }
 
 const CONV = "conv-abc";
 
 async function main() {
-  // 1) sessionStart → recall. Mints the per-tool credential + writes the rules file.
-  await runHook("recall.ts", { hook_event_name: "sessionStart", conversation_id: CONV, workspace_roots: [ws] });
+  // 1) sessionStart → recall. Mints the per-tool credential + returns the recalled block
+  //    as additional_context; nothing is written into the workspace.
+  const startOut = await runHook("recall.ts", { hook_event_name: "sessionStart", conversation_id: CONV, workspace_roots: [ws] });
 
   ok(existsSync(join(home, "tools", "cursor.json")), "sessionStart minted the per-tool credential (~/.atlaso/tools/cursor.json)");
   const cred = JSON.parse(readFileSync(join(home, "tools", "cursor.json"), "utf8"));
   ok(cred.token === "tool_token_cursor", "the minted credential is the tool's own token, exchanged from the shared bearer");
 
-  const rulesFile = join(ws, ".cursor", "rules", "atlaso-recall.mdc");
-  ok(existsSync(rulesFile), "recall wrote the rules file into <workspace>/.cursor/rules/");
-  ok(readFileSync(rulesFile, "utf8").includes("use pnpm not npm"), "the recalled memory appears in the rules file");
+  const ctx = JSON.parse(startOut.trim()).additional_context as string;
+  ok(ctx.includes("- use pnpm not npm"), "the recalled memory arrives as sessionStart additional_context");
+  ok(!existsSync(join(ws, ".cursor")), "recall wrote nothing into the workspace (no .cursor folder)");
 
   const recallReq = reqs.find((r) => r.path === "/v1/recall");
   ok(!!recallReq && recallReq.auth === "Bearer tool_token_cursor", "recall was made with the per-tool credential, NOT the shared bearer");
