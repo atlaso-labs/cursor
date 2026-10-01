@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+const ALLOW = { at: Date.now(), by: "test" }; // an upload verdict (round 3: the outbox holds allowed items only)
 
 let TMP: string;
 beforeEach(() => {
@@ -38,7 +39,7 @@ async function ob() {
 describe("outbox persistence", () => {
   test("enqueue then read back returns the item intact", async () => {
     const o = await ob();
-    expect(o.enqueue(TOOL, item("a1"))).toBe(true);
+    expect(o.enqueue(TOOL, item("a1"), ALLOW)).toBe(true);
     const p = o.pending(TOOL);
     expect(p.length).toBe(1);
     expect(p[0].client_id).toBe("a1");
@@ -48,18 +49,18 @@ describe("outbox persistence", () => {
 
   test("enqueue is idempotent on client_id — stop + sessionEnd write ONE record", async () => {
     const o = await ob();
-    o.enqueue(TOOL, item("dup"));
-    o.enqueue(TOOL, item("dup"));
-    o.enqueue(TOOL, item("dup"));
+    o.enqueue(TOOL, item("dup"), ALLOW);
+    o.enqueue(TOOL, item("dup"), ALLOW);
+    o.enqueue(TOOL, item("dup"), ALLOW);
     expect(o.pending(TOOL).length).toBe(1);
   });
 
   test("re-enqueue preserves the ORIGINAL enqueue time and attempt count", async () => {
     const o = await ob();
-    o.enqueue(TOOL, item("keep"));
+    o.enqueue(TOOL, item("keep"), ALLOW);
     const first = o.pending(TOOL)[0];
     o.bumpAttempt(TOOL, first, "boom");
-    o.enqueue(TOOL, item("keep")); // same turn seen again
+    o.enqueue(TOOL, item("keep"), ALLOW); // same turn seen again
     const again = o.pending(TOOL)[0];
     expect(again.enqueued_at).toBe(first.enqueued_at); // age must not reset
     expect(again.attempts).toBe(1); // attempts must not reset — else never quarantines
@@ -67,7 +68,7 @@ describe("outbox persistence", () => {
 
   test("settle removes the item; settling twice is harmless", async () => {
     const o = await ob();
-    o.enqueue(TOOL, item("s1"));
+    o.enqueue(TOOL, item("s1"), ALLOW);
     o.settle(TOOL, "s1");
     expect(o.pending(TOOL).length).toBe(0);
     expect(() => o.settle(TOOL, "s1")).not.toThrow();
@@ -75,16 +76,16 @@ describe("outbox persistence", () => {
 
   test("pending is oldest-first so memories sync in the order they happened", async () => {
     const o = await ob();
-    o.enqueue(TOOL, item("old"));
+    o.enqueue(TOOL, item("old"), ALLOW);
     await Bun.sleep(5);
-    o.enqueue(TOOL, item("new"));
+    o.enqueue(TOOL, item("new"), ALLOW);
     expect(o.pending(TOOL).map((r: { client_id: string }) => r.client_id)).toEqual(["old", "new"]);
   });
 
   test("hasPending is false on a fresh install and true once something is queued", async () => {
     const o = await ob();
     expect(o.hasPending(TOOL)).toBe(false);
-    o.enqueue(TOOL, item("h1"));
+    o.enqueue(TOOL, item("h1"), ALLOW);
     expect(o.hasPending(TOOL)).toBe(true);
   });
 });
@@ -92,7 +93,7 @@ describe("outbox persistence", () => {
 describe("poison pills never wedge the queue", () => {
   test("an unparseable file is quarantined on sight, not re-read forever", async () => {
     const o = await ob();
-    o.enqueue(TOOL, item("good"));
+    o.enqueue(TOOL, item("good"), ALLOW);
     writeFileSync(join(o.outboxDir(TOOL), "deadbeef.json"), "{not json", "utf8");
 
     const p = o.pending(TOOL);
@@ -103,7 +104,7 @@ describe("poison pills never wedge the queue", () => {
 
   test("attempts are capped and the item is PARKED, never deleted", async () => {
     const o = await ob();
-    o.enqueue(TOOL, item("poison"));
+    o.enqueue(TOOL, item("poison"), ALLOW);
     let disp = "retry";
     for (let i = 0; i < o.maxAttempts() + 1 && disp === "retry"; i++) {
       const rec = o.pending(TOOL)[0];
@@ -117,7 +118,7 @@ describe("poison pills never wedge the queue", () => {
 
   test("quarantine writes a ledger line so a parked memory is discoverable", async () => {
     const o = await ob();
-    o.enqueue(TOOL, item("q1"));
+    o.enqueue(TOOL, item("q1"), ALLOW);
     o.quarantine(TOOL, o.pending(TOOL)[0], "server rejected: invalid");
     const led = readFileSync(o._ledgerPathForTests(TOOL), "utf8").trim();
     expect(led).toContain("server rejected: invalid");
@@ -129,7 +130,7 @@ describe("bounds park, they never drop", () => {
   test("over-age items are quarantined rather than deleted", async () => {
     process.env.ATLASO_OUTBOX_MAX_AGE_MS = "1";
     const o = await ob();
-    o.enqueue(TOOL, item("stale"));
+    o.enqueue(TOOL, item("stale"), ALLOW);
     await Bun.sleep(5);
     const parked = o.enforceBounds(TOOL);
     expect(parked).toBe(1);
@@ -141,7 +142,7 @@ describe("bounds park, they never drop", () => {
     process.env.ATLASO_OUTBOX_MAX = "2";
     const o = await ob();
     for (const id of ["c1", "c2", "c3"]) {
-      o.enqueue(TOOL, item(id));
+      o.enqueue(TOOL, item(id), ALLOW);
       await Bun.sleep(3);
     }
     o.enforceBounds(TOOL);
@@ -170,7 +171,7 @@ describe("drain failure taxonomy", () => {
   }
 
   test("a 429 RETRIES and stops the pass — nothing is lost when the server sheds", async () => {
-    const { res, o } = await drainWith({ ok: false, status: 429 }, (o) => o.enqueue(TOOL, item("r1")));
+    const { res, o } = await drainWith({ ok: false, status: 429 }, (o) => o.enqueue(TOOL, item("r1"), ALLOW));
     expect(res.retried).toBe(1);
     expect(res.settled).toBe(0);
     expect(res.stopped).toBe(true);
@@ -178,7 +179,7 @@ describe("drain failure taxonomy", () => {
   });
 
   test("a 403 from an edge/WAF RETRIES — the sync-brick incident must not repeat", async () => {
-    const { res, o } = await drainWith({ ok: false, status: 403 }, (o) => o.enqueue(TOOL, item("w1")));
+    const { res, o } = await drainWith({ ok: false, status: 403 }, (o) => o.enqueue(TOOL, item("w1"), ALLOW));
     expect(res.retried).toBe(1);
     expect(res.quarantined).toBe(0);
     expect(o.pending(TOOL).length).toBe(1);
@@ -186,20 +187,20 @@ describe("drain failure taxonomy", () => {
 
   test("a timeout (status 0) RETRIES", async () => {
     const { res, o } = await drainWith({ ok: false, status: 0, error: "AbortError" }, (o) =>
-      o.enqueue(TOOL, item("t1")),
+      o.enqueue(TOOL, item("t1"), ALLOW),
     );
     expect(res.retried).toBe(1);
     expect(o.pending(TOOL).length).toBe(1);
   });
 
   test("a 500 RETRIES and stops", async () => {
-    const { res } = await drainWith({ ok: false, status: 500 }, (o) => o.enqueue(TOOL, item("e1")));
+    const { res } = await drainWith({ ok: false, status: 500 }, (o) => o.enqueue(TOOL, item("e1"), ALLOW));
     expect(res.retried).toBe(1);
     expect(res.stopped).toBe(true);
   });
 
   test("a durable 4xx QUARANTINES — retrying forever would wedge the queue", async () => {
-    const { res, o } = await drainWith({ ok: false, status: 400 }, (o) => o.enqueue(TOOL, item("b1")));
+    const { res, o } = await drainWith({ ok: false, status: 400 }, (o) => o.enqueue(TOOL, item("b1"), ALLOW));
     expect(res.quarantined).toBe(1);
     expect(o.pending(TOOL).length).toBe(0);
     expect(o._quarantinedForTests(TOOL, "b1")).toBe(true);
@@ -208,7 +209,7 @@ describe("drain failure taxonomy", () => {
   test("a per-item 'added' verdict SETTLES", async () => {
     const { res, o } = await drainWith(
       { ok: true, status: 200, results: [{ client_id: "ok1", status: "added" }] },
-      (o) => o.enqueue(TOOL, item("ok1")),
+      (o) => o.enqueue(TOOL, item("ok1"), ALLOW),
     );
     expect(res.settled).toBe(1);
     expect(o.pending(TOOL).length).toBe(0);
@@ -217,7 +218,7 @@ describe("drain failure taxonomy", () => {
   test("'duplicate' SETTLES — this is what an ambiguous timeout retry comes back as", async () => {
     const { res, o } = await drainWith(
       { ok: true, status: 200, results: [{ client_id: "d1", status: "duplicate" }] },
-      (o) => o.enqueue(TOOL, item("d1")),
+      (o) => o.enqueue(TOOL, item("d1"), ALLOW),
     );
     expect(res.settled).toBe(1);
     expect(o.pending(TOOL).length).toBe(0);
@@ -226,7 +227,7 @@ describe("drain failure taxonomy", () => {
   test("per-item 'invalid' QUARANTINES — the server will reject this shape forever", async () => {
     const { res, o } = await drainWith(
       { ok: true, status: 200, results: [{ client_id: "i1", status: "invalid" }] },
-      (o) => o.enqueue(TOOL, item("i1")),
+      (o) => o.enqueue(TOOL, item("i1"), ALLOW),
     );
     expect(res.quarantined).toBe(1);
     expect(o._quarantinedForTests(TOOL, "i1")).toBe(true);
@@ -235,7 +236,7 @@ describe("drain failure taxonomy", () => {
   test("a 2xx that omits our item RETRIES — we never assume it landed", async () => {
     const { res, o } = await drainWith(
       { ok: true, status: 200, results: [{ client_id: "somebody-else", status: "added" }] },
-      (o) => o.enqueue(TOOL, item("m1")),
+      (o) => o.enqueue(TOOL, item("m1"), ALLOW),
     );
     expect(res.retried).toBe(1);
     expect(o.pending(TOOL).length).toBe(1);

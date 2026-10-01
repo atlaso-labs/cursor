@@ -29,6 +29,7 @@ export interface Auth {
   token: string;
   user_id?: string;
   device_id?: string;
+  reconnect_proof?: string; // shared device continuity proof, never a tool bearer
   // Where this credential came from — set by resolveCredential (lib/credential.ts).
   // "own" = the tool's OWN ~/.atlaso/tools/<tool>.json; "shared" = the shared bearer.
   // undefined = a bare loadAuth() result (treated as shared for retirement). This is
@@ -92,6 +93,7 @@ export function loadAuth(): Auth | null {
         token: obj.token,
         user_id: obj.user_id,
         device_id: obj.device_id,
+        reconnect_proof: typeof obj.reconnect_proof === "string" ? obj.reconnect_proof : undefined,
       };
     }
   } catch {

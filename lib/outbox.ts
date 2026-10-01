@@ -18,6 +18,13 @@
  *  hook timeout) has already durably recorded the memory. Enqueue-then-send is the
  *  only ordering that survives the process dying inside `fetch`.
  *
+ *  STAGED, THEN OUTBOX (round 3, CodeRedTeam e632b415). The first durable write happens
+ *  before the entitlement verdict, so it goes to a STAGED area (`<atlaso>/staged/<tool>/`)
+ *  that no drain reads. Only the capturing hook's own allow verdict moves the turn into the
+ *  outbox, stamped with that verdict (`allow`); a drain sends stamped items only. A local-only
+ *  verdict discards the staged turn. A hook that died before deciding leaves its turn staged
+ *  for the next hook of the same tool to decide with a verdict it has just re-evaluated.
+ *
  *  STORAGE: one file per item, written tmp+rename so a reader never sees a partial
  *  record and a torn write cannot corrupt the queue. Chosen over a single JSONL log
  *  because two Cursor windows are two concurrent hook processes appending to the
@@ -50,7 +57,7 @@ import {
   writeFileSync,
   appendFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { atlasoDir, type DepositItem } from "./atlaso";
 
 /** Bounds are read PER CALL, not at module load — the same convention lock.ts uses
@@ -75,12 +82,30 @@ export const maxAgeMs = () => num("ATLASO_OUTBOX_MAX_AGE_MS", 30 * 24 * 3600 * 1
  *  outages should not burn through this in one bad afternoon. */
 export const maxAttempts = () => num("ATLASO_OUTBOX_MAX_ATTEMPTS", 25);
 
+/** The capturing hook's own upload decision, recorded on the item when it is promoted from the
+ *  staged area into the outbox. Content-free: when, and which hook path decided. */
+export interface AllowVerdict {
+  at: number;
+  by: string;
+}
+
 export interface OutboxRecord {
   client_id: string;
   item: DepositItem;
   enqueued_at: number;
   attempts: number;
   last_error?: string;
+  /** Present on every item a drain may send (rung "hooks never hang" round 3). */
+  allow?: AllowVerdict;
+}
+
+/** A turn written before its entitlement verdict exists. Never read by a drain. */
+export interface StagedRecord {
+  client_id: string;
+  item: DepositItem;
+  enqueued_at: number;
+  /** The process that staged it; while that process lives, only it may decide. */
+  pid: number;
 }
 
 /** What a push attempt concluded about ONE item. Drives whether it leaves the
@@ -92,6 +117,10 @@ export function outboxDir(tool: string): string {
 }
 export function quarantineDir(tool: string): string {
   return join(outboxDir(tool), "quarantine");
+}
+/** The staged area: outside the outbox tree, so no drain, bound or quarantine pass ever reads it. */
+export function stagedDir(tool: string): string {
+  return join(atlasoDir(), "staged", tool);
 }
 function ledgerPath(tool: string): string {
   return join(outboxDir(tool), "quarantine.log");
@@ -109,6 +138,26 @@ function ensureDir(p: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Best-effort fsync of a directory, so a rename into it is durable. Unsupported on some
+ *  platforms (Windows): the write is still atomic there, only not crash-durable. */
+function syncDir(dir: string): void {
+  let fd: number | null = null;
+  try {
+    fd = openSync(dir, "r");
+    fsyncSync(fd);
+  } catch {
+    /* not supported here */
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+    }
   }
 }
 
@@ -135,6 +184,7 @@ function writeAtomic(path: string, body: string): boolean {
       }
     }
     renameSync(tmp, path);
+    syncDir(dirname(path)); // the rename itself survives a machine crash, not only the bytes
     return true;
   } catch {
     try {
@@ -147,13 +197,15 @@ function writeAtomic(path: string, body: string): boolean {
 }
 
 /**
- * Persist an item BEFORE it is sent. Idempotent on `client_id`: enqueueing the
- * same turn twice (Cursor fires stop AND sessionEnd for one turn) overwrites.
- * Returns false only if the disk itself is unusable — the caller still attempts
- * the network, so a read-only home directory degrades to today's behaviour rather
- * than blocking capture.
+ * Persist an item for upload, with the upload decision that allows it. Only a caller holding
+ * its own allow verdict (entitlement said cloud-linked AND a tool credential resolved) may
+ * enqueue: the outbox is drainable by any later hook of this tool, so an item here WILL be sent.
+ * A turn whose verdict is not known yet goes to `stage` instead (CodeRedTeam e632b415).
+ * Idempotent on `client_id`: enqueueing the same turn twice (Cursor fires stop AND sessionEnd
+ * for one turn) overwrites. `enqueuedAt` carries the capture time of a promoted staged turn.
+ * Returns false only if the disk itself is unusable.
  */
-export function enqueue(tool: string, item: DepositItem): boolean {
+export function enqueue(tool: string, item: DepositItem, allow: AllowVerdict, enqueuedAt?: number): boolean {
   const dir = outboxDir(tool);
   if (!ensureDir(dir)) return false;
   const existing = readRecord(join(dir, fileFor(item.client_id)));
@@ -162,10 +214,148 @@ export function enqueue(tool: string, item: DepositItem): boolean {
     item,
     // Preserve the ORIGINAL enqueue time across re-enqueues so age bounds measure
     // how long the memory has been stranded, not when we last saw the turn.
-    enqueued_at: existing?.enqueued_at ?? Date.now(),
+    enqueued_at: existing?.enqueued_at ?? enqueuedAt ?? Date.now(),
     attempts: existing?.attempts ?? 0,
+    allow: existing?.allow ?? allow,
   };
   return writeAtomic(join(dir, fileFor(item.client_id)), JSON.stringify(rec));
+}
+
+/**
+ * WRITE-AHEAD before the verdict: persist a finished turn where no drain looks, BEFORE
+ * entitlement, credential or deposit. A hook killed while it waits on the network leaves the
+ * turn here; the next hook of this tool that holds its OWN allow verdict promotes it
+ * (`resolveStaged`), and one whose verdict is local-only discards it. Idempotent on client_id.
+ * `pid` is for tests only (the owner is this process).
+ */
+export function stage(tool: string, item: DepositItem, opts: { pid?: number } = {}): boolean {
+  const dir = stagedDir(tool);
+  if (!ensureDir(dir)) return false;
+  const existing = readStaged(join(dir, fileFor(item.client_id)));
+  const rec: StagedRecord = {
+    client_id: item.client_id,
+    item,
+    enqueued_at: existing?.enqueued_at ?? Date.now(),
+    pid: opts.pid ?? process.pid,
+  };
+  return writeAtomic(join(dir, fileFor(item.client_id)), JSON.stringify(rec));
+}
+
+function readStaged(path: string): StagedRecord | null {
+  try {
+    const rec = JSON.parse(readFileSync(path, "utf8")) as StagedRecord;
+    if (!rec || typeof rec.client_id !== "string" || !rec.item) return null;
+    if (typeof rec.enqueued_at !== "number") rec.enqueued_at = Date.now();
+    if (typeof rec.pid !== "number") rec.pid = 0;
+    return rec;
+  } catch {
+    return null;
+  }
+}
+
+/** True if this turn is staged (written, no verdict yet). */
+export function isStaged(tool: string, clientId: string): boolean {
+  return existsSync(join(stagedDir(tool), fileFor(clientId)));
+}
+
+/** The staged turn, if any (the capturing hook's own copy). */
+export function readStagedItem(tool: string, clientId: string): StagedRecord | null {
+  return readStaged(join(stagedDir(tool), fileFor(clientId)));
+}
+
+/** Drop a staged turn: its verdict was local-only, or it is now in the outbox. */
+export function unstage(tool: string, clientId: string): void {
+  try {
+    unlinkSync(join(stagedDir(tool), fileFor(clientId)));
+  } catch {
+    /* already gone */
+  }
+}
+
+/**
+ * The capturing hook's own verdict allowed upload: move ITS staged turn into the outbox with
+ * that verdict recorded. Outbox first, then the staged copy goes, so a crash between the two
+ * leaves a duplicate that the next promotion overwrites (same client_id), never a loss.
+ */
+export function promote(tool: string, clientId: string, allow: AllowVerdict): boolean {
+  const rec = readStaged(join(stagedDir(tool), fileFor(clientId)));
+  if (!rec) return isQueued(tool, clientId);
+  if (!enqueue(tool, rec.item, allow, rec.enqueued_at)) return false;
+  unstage(tool, clientId);
+  return true;
+}
+
+/** A staged turn older than this has outlived any hook that could still be deciding it. */
+export const orphanAgeMs = () => num("ATLASO_STAGED_ORPHAN_MS", 10 * 60 * 1000);
+
+function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === "EPERM"; // exists, not ours to signal
+  }
+}
+
+/**
+ * Settle turns whose own hook died before its verdict (host timeout, editor quit), using THIS
+ * hook's verdict for the same tool, re-evaluated just now: `allow` promotes them, null
+ * (local-only) discards them. A turn whose staging process is still alive (and younger than
+ * `orphanAgeMs`) is left to that process: promoting it here would upload a turn whose own
+ * verdict may still come back local-only, the exact round-2 defect.
+ *
+ * With `adoptLegacy`, also adopts outbox records in the pre-round-3 shape (no `allow`): released
+ * versions wrote the outbox only after an allow verdict, so a hook holding its own allow verdict
+ * stamps them; nothing in this version writes an unstamped record. That pass reads every queued
+ * record, so only the catch-up paths (session start, chat.message) ask for it, never the save
+ * path of a finished turn. Returns the number promoted.
+ */
+export function resolveStaged(
+  tool: string,
+  allow: AllowVerdict | null,
+  opts: { adoptLegacy?: boolean; now?: number } = {},
+): number {
+  const now = opts.now ?? Date.now();
+  let promoted = 0;
+  const dir = stagedDir(tool);
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  } catch {
+    /* nothing staged */
+  }
+  for (const name of names) {
+    const path = join(dir, name);
+    const rec = readStaged(path);
+    if (!rec) {
+      try {
+        unlinkSync(path); // unreadable and never sent: nothing to keep
+      } catch {
+        /* gone */
+      }
+      continue;
+    }
+    // Its own hook (this process included) is alive and within any hook's lifetime: it decides.
+    if (pidAlive(rec.pid) && now - rec.enqueued_at < orphanAgeMs()) continue;
+    if (allow) {
+      if (promote(tool, rec.client_id, allow)) promoted++;
+    } else {
+      unstage(tool, rec.client_id);
+    }
+  }
+  if (allow && opts.adoptLegacy) {
+    try {
+      for (const name of readdirSync(outboxDir(tool)).filter((f) => f.endsWith(".json"))) {
+        const p = join(outboxDir(tool), name);
+        const rec = readRecord(p);
+        if (rec && !rec.allow) writeAtomic(p, JSON.stringify({ ...rec, allow }));
+      }
+    } catch {
+      /* no outbox yet */
+    }
+  }
+  return promoted;
 }
 
 function readRecord(path: string): OutboxRecord | null {
@@ -208,11 +398,18 @@ export function pending(tool: string, limit = maxDrainPerRun()): OutboxRecord[] 
   const recs: OutboxRecord[] = [];
   for (const name of names) {
     const rec = readRecord(join(dir, name));
-    if (rec) recs.push(rec);
-    else quarantineFile(tool, name, "unreadable");
+    // No recorded allow verdict → not sendable. Left in place for `resolveStaged` to adopt.
+    if (rec) {
+      if (rec.allow) recs.push(rec);
+    } else quarantineFile(tool, name, "unreadable");
   }
   recs.sort((a, b) => a.enqueued_at - b.enqueued_at);
   return recs.slice(0, limit);
+}
+
+/** True if an item with this idempotency key is waiting in the queue. */
+export function isQueued(tool: string, clientId: string): boolean {
+  return existsSync(join(outboxDir(tool), fileFor(clientId)));
 }
 
 /** Item accepted (or already known) by the server — remove it. */
@@ -320,7 +517,7 @@ export function enforceBounds(tool: string, now = Date.now()): number {
 
 /** Present only so tests can start from a known state. */
 export function _resetForTests(tool: string): void {
-  for (const dir of [quarantineDir(tool), outboxDir(tool)]) {
+  for (const dir of [quarantineDir(tool), outboxDir(tool), stagedDir(tool)]) {
     try {
       for (const f of readdirSync(dir)) {
         try {

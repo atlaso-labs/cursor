@@ -112,6 +112,9 @@ export async function drain(
     if (!items.length) return out;
 
     for (const rec of items) {
+      // Only an item the capturing hook's own verdict allowed is ever sent (round 3,
+      // CodeRedTeam e632b415). `pending` already filters; this is the drain's own refusal.
+      if (!rec.allow) continue;
       out.attempted++;
       let res: Awaited<ReturnType<DepositFn>>;
       try {

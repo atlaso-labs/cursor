@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.6] - 2026-10-01
+
+Hooks never hold up a session. Session-start recall gives up after 2.5 s and hands Cursor the session context before it catches up on queued notes; every Atlaso hook now ends within 8 s (Cursor allows 50), and a queued note cut off mid-send is sent on a later turn. Each skip is counted on this device as a time, tool and reason, never any text, and `atlaso status` shows the count for the last 24 hours, with skipped recall and interrupted saving listed separately.
+
+A finished turn is now written to this device before Atlaso checks your plan or credential, so a slow Atlaso server can no longer lose it when the hook stops at its time limit. It becomes uploadable only after that check allows it: until then no other hook can send it, and a tool that is local-only on your plan never uploads it. A turn whose hook stopped before the check is decided, and sent once if allowed, by the next Cursor hook.
+
+Reconnecting a saved device renews that same device. Atlaso now keeps a reconnect proof, issued when you connect, in the owner-only auth file on this device and sends it when this device reconnects.
+
 ## [0.2.5] - 2026-09-30
 
 Security fixes (batch B1). A saved note can no longer add lines to the recalled memory block or fake the start or end of the memory block, and invisible control, zero-width and bidirectional-override characters are removed from recalled notes. Ordinary notes print exactly as before, tabs and emoji included; a note with Windows (CRLF) line endings no longer carries a stray carriage return.

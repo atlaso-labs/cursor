@@ -56,9 +56,10 @@ export function writeAuth(
     token: string;
     user_id: string;
     device_id: string | null;
+    reconnect_proof?: string | null;
   },
 ): string {
-  const { server, token, user_id, device_id } = opts;
+  const { server, token, user_id, device_id, reconnect_proof } = opts;
   const dir = atlasoDir();
   mkdirSync(dir, { recursive: true });
   try {
@@ -67,7 +68,7 @@ export function writeAuth(
     /* ignore */
   }
   const p = authPath();
-  const data = JSON.stringify({ server, token, user_id, device_id }, null, 2);
+  const data = JSON.stringify({ server, token, user_id, device_id, reconnect_proof }, null, 2);
   const tmp = join(dir, `.auth.${process.pid}.${randomUUID()}.tmp`);
   const fd = openSync(tmp, "wx", 0o600); // O_CREAT|O_EXCL|O_WRONLY, owner-only
   try {
@@ -203,6 +204,7 @@ export async function runConnect(): Promise<number> {
       label, tool: tool.slice(0, 40), code_challenge: challenge, redirect_uri: redirectUri, state,
     };
     if (existing.device_id) startBody.device_id = existing.device_id; // reconnect rotates in place
+    if (existing.device_id && existing.reconnect_proof) startBody.reconnect_proof = existing.reconnect_proof;
 
     const r = await fetchT(
       `${base}/v1/device/start`,
@@ -251,6 +253,7 @@ export async function runConnect(): Promise<number> {
         token: t.token,
         user_id: t.user_id,
         device_id: t.device_id ?? null,
+        reconnect_proof: t.reconnect_proof ?? null,
       });
       return 0;
     }

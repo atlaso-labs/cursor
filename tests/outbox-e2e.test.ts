@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { depositDetailed } from "../lib/atlaso";
 import { drain } from "../lib/drain";
 import { enqueue, pending, quarantineCount, settle, _quarantinedForTests } from "../lib/outbox";
+const ALLOW = { at: Date.now(), by: "test" }; // an upload verdict (round 3: the outbox holds allowed items only)
 
 const TOOL = "cursor";
 
@@ -77,7 +78,7 @@ describe("a memory survives the brain being down", () => {
     );
 
     // Capture during the outage: write-ahead, then the send fails.
-    enqueue(TOOL, item("m1"));
+    enqueue(TOOL, item("m1"), ALLOW);
     const first = await depositDetailed(auth, [item("m1")]);
     expect(first.ok).toBe(false);
     expect(first.status).toBe(503);
@@ -100,7 +101,7 @@ describe("a memory survives the brain being down", () => {
     probe.stop(true);
     const auth = { server: `http://127.0.0.1:${deadPort}`, token: "t", device_id: "d" };
 
-    enqueue(TOOL, item("offline"));
+    enqueue(TOOL, item("offline"), ALLOW);
     const r = await depositDetailed(auth as any, [item("offline")]);
     expect(r.ok).toBe(false);
     expect(r.status).toBe(0); // transport class, NOT an HTTP verdict
@@ -121,7 +122,7 @@ describe("a memory survives the brain being down", () => {
       return items.map((i) => ({ client_id: i.client_id, status: "duplicate" }));
     });
 
-    enqueue(TOOL, item("amb"));
+    enqueue(TOOL, item("amb"), ALLOW);
     await depositDetailed(auth, [item("amb")]); // committed but reported failed
     const res = await drain(TOOL, auth); // retry
 
@@ -138,7 +139,7 @@ describe("shedding and blocking never destroy data", () => {
       shedding ? 429 : items.map((i) => ({ client_id: i.client_id, status: "added" })),
     );
 
-    for (const id of ["a", "b", "c"]) enqueue(TOOL, item(id));
+    for (const id of ["a", "b", "c"]) enqueue(TOOL, item(id), ALLOW);
     const shed = await drain(TOOL, auth);
     expect(shed.settled).toBe(0);
     expect(shed.stopped).toBe(true); // backs off rather than hammering
@@ -155,7 +156,7 @@ describe("shedding and blocking never destroy data", () => {
     const { auth } = brain((items) =>
       blocked ? 403 : items.map((i) => ({ client_id: i.client_id, status: "added" })),
     );
-    enqueue(TOOL, item("waf"));
+    enqueue(TOOL, item("waf"), ALLOW);
     await drain(TOOL, auth);
     expect(pending(TOOL).length).toBe(1); // survived the block
 
@@ -173,11 +174,11 @@ describe("a poisoned item cannot block healthy ones", () => {
       })),
     );
 
-    enqueue(TOOL, item("bad")); // oldest — would head-of-line block a naive queue
+    enqueue(TOOL, item("bad"), ALLOW); // oldest — would head-of-line block a naive queue
     await Bun.sleep(3);
-    enqueue(TOOL, item("good1"));
+    enqueue(TOOL, item("good1"), ALLOW);
     await Bun.sleep(3);
-    enqueue(TOOL, item("good2"));
+    enqueue(TOOL, item("good2"), ALLOW);
 
     const res = await drain(TOOL, auth);
     expect(res.quarantined).toBe(1);
@@ -191,7 +192,7 @@ describe("a poisoned item cannot block healthy ones", () => {
 describe("the happy path stays cheap", () => {
   test("a successful capture leaves nothing behind", async () => {
     const { auth } = brain((items) => items.map((i) => ({ client_id: i.client_id, status: "added" })));
-    enqueue(TOOL, item("h1"));
+    enqueue(TOOL, item("h1"), ALLOW);
     const r = await depositDetailed(auth, [item("h1")]);
     expect(r.ok).toBe(true);
     settle(TOOL, "h1");

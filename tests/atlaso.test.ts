@@ -30,6 +30,10 @@ function res(status: number, body: any, headers: Record<string, string> = {}): a
 const VERIFIED = { "x-atlaso-response": "1" };
 
 describe("loadAuth", () => {
+  test("preserves a saved device reconnect proof", () => {
+    writeFileSync(join(tmp, "auth.json"), JSON.stringify({ server: "https://b", token: "synthetic-token", device_id: "synthetic-device", reconnect_proof: "synthetic-proof" }));
+    expect(loadAuth()?.reconnect_proof).toBe("synthetic-proof");
+  });
   test("reads {server, token} from ATLASO_GLOBAL_PATH/auth.json", () => {
     writeFileSync(join(tmp, "auth.json"), JSON.stringify({ server: "https://b", token: "atl_t", user_id: "u" }));
     expect(loadAuth()).toMatchObject({ server: "https://b", token: "atl_t", user_id: "u" });

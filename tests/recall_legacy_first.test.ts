@@ -64,7 +64,7 @@ test("old recall file is gone when the hook is killed at its first network reque
     evidence_grade: "observed",
     scope_note: null,
     tags: [],
-  });
+  }, { at: Date.now(), by: "test" });
 
   const child = Bun.spawn(["bun", "run", HOOK], {
     env: { ...process.env, ATLASO_GLOBAL_PATH: home, ATLASO_NO_BROWSER: "1", ATLASO_NO_CONNECT: "1" },

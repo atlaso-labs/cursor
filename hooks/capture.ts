@@ -12,9 +12,11 @@
  * ZERO model involvement. Online-first: with no token / not cloud-linked we skip.
  * Never breaks the session (always exits 0).
  */
+// deadline first: its start time is the hook's start time (rung "hooks never hang").
+import { armHardExit } from "../lib/deadline";
 import { depositDetailed, loadAuth, type DepositItem } from "../lib/atlaso";
 import { drainIfPending } from "../lib/drain";
-import { enqueue, quarantine, settle } from "../lib/outbox";
+import { enqueue, promote, quarantine, resolveStaged, settle, stage, unstage } from "../lib/outbox";
 import {
   buildContent, classifyScope, heuristicPolarity, messageKey, scrub, shouldDeposit, turnKey,
 } from "../lib/capture";
@@ -29,6 +31,10 @@ import { parsePayload, readStdin } from "../lib/stdin";
 import { exchangeFromPayload, lastExchangeFromFile } from "../lib/transcript";
 
 const TOOL = "cursor";
+/** Hook budgets: the stash events are local-only; stop/sessionEnd deposit over the network. */
+const STASH_BUDGET_MS = 1000;
+/** ATLASO_CURSOR_HOOK_BUDGET_MS (shared with recall) exists for tests and support only. */
+const DEPOSIT_BUDGET_MS = Number(process.env.ATLASO_CURSOR_HOOK_BUDGET_MS) || 8000;
 
 const convId = (payload: Record<string, any>): string =>
   String(payload?.conversation_id || payload?.conversationId || "default");
@@ -150,19 +156,36 @@ async function depositTurn(payload: Record<string, any>, event: string): Promise
       log("capture", "skip (completion receipt unavailable)");
       return;
     }
-    if (pendingSelected) clearPending(conversation);
-  } else if (pendingSelected) {
-    clearPending(conversation);
   }
 
-  const auth = loadAuth();
+  const auth = loadAuth(); // local file read, no network
   if (!auth) {
+    // Online-first: a signed-out device keeps nothing. Same decision as before this rung.
+    if (pendingSelected) clearPending(conversation);
     log("capture", "skip (no auth — online-first)");
     return;
   }
+  // WRITE-AHEAD, FIRST, INTO THE STAGED AREA. The turn is on disk (fsynced, atomic rename)
+  // before any network call and before the pending stash is cleared, so the hard exit (8 s)
+  // during entitlement or credential resolution below cannot lose it (CodeRedTeam 580c16b5).
+  // It is NOT in the outbox yet: the outbox is drainable by any hook of this tool, and this
+  // turn has no upload verdict. Only THIS hook's own allow verdict below promotes it
+  // (CodeRedTeam e632b415: a drain in the entitlement gap uploaded a turn the verdict then
+  // refused). If this hook dies first, the next hook of this tool decides with its own verdict.
+  const staged = stage(TOOL, item);
+  // Only a durable copy lets the stash go. If the disk refused, the stash stays for
+  // sessionEnd (stop) or is left to go stale, and we still try the network below.
+  if (staged && pendingSelected) clearPending(conversation);
+
   // entitlement gate: don't deposit to the cloud unless this tool is cloud-linked
   // (free plan = 1 active tool/device; enforced client-side).
   if (!(await online(auth, { tool: TOOL, deviceId: auth.device_id ?? null }))) {
+    // Local-only is a decision: the staged turn is dropped (this connector keeps no local
+    // store, as before this rung) and so are staged turns of hooks that died undecided.
+    // Nothing of this turn was ever drainable, so nothing was sent.
+    unstage(TOOL, item.client_id);
+    resolveStaged(TOOL, null);
+    if (pendingSelected) clearPending(conversation);
     log("capture", "skip (not cloud-linked — local-only)");
     return;
   }
@@ -170,22 +193,30 @@ async function depositTurn(payload: Record<string, any>, event: string): Promise
   // attributed to Cursor. Null = local-only this run (tombstoned/not-entitled) → skip.
   const cred = await resolveCredential(TOOL);
   if (!cred) {
+    unstage(TOOL, item.client_id);
+    resolveStaged(TOOL, null);
+    if (pendingSelected) clearPending(conversation);
     log("capture", "skip (local-only — no tool credential)");
     return;
   }
-  // WRITE-AHEAD. Persist BEFORE the network call, never after it fails, so a process
-  // killed inside fetch (editor quit, machine sleep, hook timeout, a brain restart
-  // mid-deploy) has already durably recorded the memory. Idempotent on client_id.
-  enqueue(TOOL, item);
+  // Allowed: record the verdict on the turn and make it drainable, then settle orphans.
+  const allow = { at: Date.now(), by: "capture" };
+  const queued = staged ? promote(TOOL, item.client_id, allow) : enqueue(TOOL, item, allow);
+  resolveStaged(TOOL, allow);
 
   try {
     const { ok, results, status } = await depositDetailed(cred, [item]);
     if (ok) {
       const verdict = results.find((r) => r.client_id === item.client_id);
-      if (verdict && verdict.status !== "invalid") settle(TOOL, item.client_id);
-      else if (verdict)
+      if (verdict && verdict.status !== "invalid") {
+        settle(TOOL, item.client_id);
+        // The disk refused the write-ahead but the brain has the turn: the stash can go now.
+        if (!queued && pendingSelected) clearPending(conversation);
+        unstage(TOOL, item.client_id); // promotion failed half-way: the brain has it
+      } else if (verdict) {
         quarantine(TOOL, { client_id: item.client_id, item, enqueued_at: Date.now(), attempts: 1 },
                    `server rejected: ${verdict.status}`);
+      }
     }
     log("capture", `saved=${ok}${ok ? "" : ` queued (${status || "transport"})`} scope=${scope}`);
   } catch (e) {
@@ -200,6 +231,13 @@ async function main(): Promise<void> {
   if (process.env.ATLASO_EXTRACTING) return; // never capture our own enrichment
   const payload = parsePayload(await readStdin());
   const event = String(payload?.hook_event_name || "");
+  // The stash events are local-only (host allows 10 s); stop/sessionEnd make network calls
+  // (host allows 50 s). Past the budget the process exits 0 whatever is in flight: the
+  // completion receipt and the staged turn are written synchronously before any network
+  // call (entitlement, credential, deposit), so an interrupted run is decided by the next
+  // hook's own verdict and retried from the outbox, never lost or duplicated.
+  const stash = event === "beforeSubmitPrompt" || event === "afterAgentResponse";
+  armHardExit(stash ? STASH_BUDGET_MS : DEPOSIT_BUDGET_MS, TOOL, "capture");
 
   // Route by event. beforeSubmitPrompt / afterAgentResponse only STASH (fast, no
   // network); the deposit happens once, on stop/sessionEnd.
