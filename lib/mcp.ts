@@ -15,7 +15,7 @@
  * STDOUT IS THE PROTOCOL — nothing but JSON-RPC frames may be written there. All
  * diagnostics go to the debug file (lib/log). One complete JSON object per line.
  */
-import { forget, health, loadAuth, recall, recent, remember } from "./atlaso";
+import { FORGET_FAILED_NOTE, FORGET_PENDING_NOTE, forget, health, loadAuth, recall, recent, remember } from "./atlaso";
 
 /** The UTC calendar day ("2026-08-14") the user stated a note, or null when unknown.
  *  `value` is the brain's statement time: `created_at` on a /v1/recall hit, `stated_at`
@@ -53,6 +53,7 @@ import { cloudMode, online } from "./entitlement";
 import { REVOKED } from "./state";
 import { log } from "./log";
 import { currentProjectKey, currentProjectResolution, resultVisibleHere } from "./project";
+import { redactText } from "./render";
 
 const NAME = "Atlaso";
 const VERSION = "0.1.0";
@@ -65,7 +66,7 @@ export const TOOLS = [
   {
     name: "recall",
     description:
-      "Search the user's Atlaso long-term memory for notes relevant to `query` — past decisions, preferences, conventions, project facts, gotchas. Call it before answering when prior context would help. Each result has stated_on: the day the user stated it (YYYY-MM-DD), or null when unknown. Read-only.",
+      "Search the user's Atlaso long-term memory for notes relevant to `query`: past decisions, preferences, conventions, project facts, gotchas. Call it before answering when prior context would help. Each result has stated_on: the day the user stated it (YYYY-MM-DD), or null when unknown. Read-only.",
     inputSchema: {
       type: "object",
       properties: { query: { type: "string" }, limit: { type: "integer", default: 5 } },
@@ -136,7 +137,7 @@ export async function dispatch(name: string, args: any): Promise<any> {
       error:
         mode.reason === REVOKED
           ? "Atlaso memory was removed for Cursor on this device. Re-add the plugin (or run `atlaso connect`) to turn it back on."
-          : "Atlaso memory is local-only for Cursor right now — on the free plan only one tool per device is active. Upgrade or switch the active tool at https://app.atlaso.ai.",
+          : "Atlaso memory is local-only for Cursor right now: on the free plan only one tool per device is active. Upgrade or switch the active tool at https://app.atlaso.ai.",
     };
   }
   const auth = await resolveCredential(TOOL);
@@ -155,7 +156,8 @@ export async function dispatch(name: string, args: any): Promise<any> {
         results: results
           .filter((r) => resultVisibleHere(r, project))
           .slice(0, limit)
-          .map((r) => ({ id: r.id, content: r.content, stated_on: statedOn(r.created_at) })),
+          // Every note text is credential-redacted in place (rung c16ac87c); ids unchanged.
+          .map((r) => ({ id: r.id, content: redactText(r.content), stated_on: statedOn(r.created_at) })),
       };
     }
     case "recent": {
@@ -167,7 +169,7 @@ export async function dispatch(name: string, args: any): Promise<any> {
         .filter((r) => resultVisibleHere(r, project))
         .slice(0, limit)
         // stated_at, never created_at: a /v1/memories row's created_at is its insertion time.
-        .map((r) => ({ id: r.id, content: r.content, stated_on: statedOn(r.stated_at) }));
+        .map((r) => ({ id: r.id, content: redactText(r.content), stated_on: statedOn(r.stated_at) }));
       return { memories };
     }
     case "remember": {
@@ -201,15 +203,17 @@ export async function dispatch(name: string, args: any): Promise<any> {
       const id = await remember(auth, { text, tags });
       if (!id) return { saved: false, error: "empty text, or the server was unreachable" };
       return effScope === "project" && !project
-        ? { saved: true, id, scope: effScope, note: "saved without a project key — this project could not be identified, so the memory is visible everywhere" }
+        ? { saved: true, id, scope: effScope, note: "saved without a project key: this project could not be identified, so the memory is visible everywhere" }
         : { saved: true, id, scope: effScope };
     }
     case "forget": {
       const id = String(args?.id ?? "");
-      const ok = await forget(auth, id);
-      return ok
-        ? { forgotten: true, id }
-        : { forgotten: false, id, note: "not forgotten — the server was unreachable. Try again when connected." };
+      const outcome = await forget(auth, id);
+      if (outcome === "forgotten") return { forgotten: true, id };
+      if (outcome === "pending") {
+        return { forgotten: false, id, forget_pending: true, retryable: true, note: FORGET_PENDING_NOTE };
+      }
+      return { forgotten: false, id, note: FORGET_FAILED_NOTE };
     }
     case "status": {
       const h = await health(auth);

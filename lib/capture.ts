@@ -99,58 +99,7 @@ export function turnKey(userMsg: string, scope: string, project: string | null):
 }
 
 // ── secret scrub (defense-in-depth; the server re-scrubs too) ────────────────
-type Rule = { kind: string; re: RegExp };
-const PATTERNS: Rule[] = [
-  { kind: "private_key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
-  { kind: "openai_anthropic_key", re: /\bsk-[A-Za-z0-9_-]{16,}\b/g },
-  { kind: "github_token", re: /\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b/g },
-  { kind: "aws_access_key", re: /\bAKIA[0-9A-Z]{16}\b/g },
-  { kind: "google_api_key", re: /\bAIza[0-9A-Za-z_-]{35}\b/g },
-  { kind: "slack_token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g },
-  { kind: "uri_credential", re: /\b([a-zA-Z][a-zA-Z0-9+.\-]*:\/\/[^\s:/@]*):([^\s/@]+)@/g },
-  { kind: "jwt", re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
-  { kind: "bearer", re: /\bbearer\s+[A-Za-z0-9._\-]{16,}/gi },
-  {
-    // key looks secret-y → redact its value whether unquoted OR quoted (quoted
-    // values may contain spaces, e.g. PASSWORD="correct horse battery staple").
-    kind: "assignment",
-    re: /\b([A-Za-z0-9_]*(?:api[_-]?key|secret|token|password|passwd|pwd|access[_-]?key|client[_-]?secret|auth[_-]?token)[A-Za-z0-9_]*)\s*[:=]\s*(?:"[^"]{2,}"|'[^']{2,}'|[^\s"']{6,})/gi,
-  },
-];
-const BLOB = /\b[A-Za-z0-9+/=_-]{32,}\b/g;
-const ENTROPY_THRESHOLD = 4.2;
-
-function entropy(s: string): number {
-  if (!s) return 0;
-  const n = s.length;
-  const counts = new Map<string, number>();
-  for (const c of s) counts.set(c, (counts.get(c) || 0) + 1);
-  let e = 0;
-  for (const c of counts.values()) e -= (c / n) * Math.log2(c / n);
-  return e;
-}
-
-/** Returns [scrubbed, kindsFound]. */
-export function scrub(text: string): [string, string[]] {
-  if (!text) return [text, []];
-  const found: string[] = [];
-  let out = text;
-  for (const { kind, re } of PATTERNS) {
-    out = out.replace(re, (...args: any[]) => {
-      const groups = args.slice(1, -2); // capture groups (drop offset + whole string)
-      found.push(kind);
-      if (kind === "assignment") return `${groups[0]}=[REDACTED]`; // keep the key name
-      if (kind === "uri_credential") return `${groups[0]}:[REDACTED]@`; // keep scheme+user+host
-      return `[REDACTED:${kind}]`;
-    });
-  }
-  out = out.replace(BLOB, (tok: string) => {
-    if (tok.includes("REDACTED")) return tok;
-    if (entropy(tok) >= ENTROPY_THRESHOLD) {
-      found.push("high_entropy");
-      return "[REDACTED:high_entropy]";
-    }
-    return tok;
-  });
-  return [out, found];
-}
+// The server's full detection set plus the connector-only quoted-assignment rule, in
+// ./scrub (a port of atlaso/platform/sdk/src/atlaso/recall/scrub.py with a drift test).
+// Returns [scrubbed, kindsFound]; the original string when nothing is found.
+export { scrub } from "./scrub";

@@ -1,0 +1,31 @@
+import {test,expect,afterAll} from 'bun:test';
+import {mkdirSync,writeFileSync,mkdtempSync} from 'node:fs';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+const TOOL=process.env.SE_TEST_TOOL!;
+const root=mkdtempSync(join(tmpdir(),'sec-fcf41ff2-scope-'));
+const repo=join(root,'repo-b');mkdirSync(join(repo,'.git'),{recursive:true});
+writeFileSync(join(repo,'.git','config'),'[remote "origin"]\n url = https://synthetic.invalid/team/repo-b.git\n');
+const before=process.cwd(); process.chdir(repo);process.env.PWD=repo;
+for(const k of ['CURSOR_PROJECT_DIR','CURSOR_WORKSPACE_ROOT','OPENCODE_PROJECT_DIR','WORKSPACE_FOLDER_PATHS','ATLASO_CALLER_PWD']) delete process.env[k];
+const {projectKey,currentProjectResolution}=await import('../lib/project');
+const key=projectKey(repo); let sent:string|null=null;
+const server=Bun.serve({port:0,fetch(req){const u=new URL(req.url);
+ let body:any={};
+ if(u.pathname==='/v1/entitlement')body={multi_tool:true,active_tool:null,needs_reconnect:false};
+ if(u.pathname==='/v1/recall') {sent=u.searchParams.get('project');body={results:[{id:'personal',content:'synthetic personal note',tags:['scope:personal']},...(sent===key?[{id:'repo-b',content:'synthetic repository B only note',tags:['scope:project',`project:${key}`]}]:[])]};}
+ return Response.json(body,{headers:{'x-atlaso-response':'1'}});
+}});
+const base=`http://127.0.0.1:${server.port}`,home=join(root,'atlaso');mkdirSync(join(home,'tools'),{recursive:true});
+writeFileSync(join(home,'auth.json'),JSON.stringify({server:base,token:'synthetic-shared',user_id:'synthetic-fcf41ff2',device_id:'synthetic-device'}));
+writeFileSync(join(home,'tools',TOOL+'.json'),JSON.stringify({server:base,token:'synthetic-tool',user_id:'synthetic-fcf41ff2',device_id:'synthetic-device',tool:TOOL}));
+process.env.ATLASO_GLOBAL_PATH=home;process.env.ATLASO_SERVER=base;
+const {dispatch}=await import('../lib/mcp');
+afterAll(()=>{server.stop(true);process.chdir(before)});
+test('missing explicit workspace selector is personal-only despite repository cwd',async()=>{
+ expect(key).toBeTruthy();expect(currentProjectResolution().status).toBe('unknown');
+ const out=await dispatch('recall',{query:'synthetic note',limit:10});
+ const ids=out.results.map((r:any)=>r.id);
+ console.log(JSON.stringify({tool:TOOL,selector:'absent',sent_project:sent,ids}));
+ expect(ids).toContain('personal');expect(ids).not.toContain('repo-b');expect(sent).toBeNull();
+});

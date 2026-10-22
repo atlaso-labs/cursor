@@ -162,7 +162,7 @@ async function depositTurn(payload: Record<string, any>, event: string): Promise
   if (!auth) {
     // Online-first: a signed-out device keeps nothing. Same decision as before this rung.
     if (pendingSelected) clearPending(conversation);
-    log("capture", "skip (no auth — online-first)");
+    log("capture", "skip (no auth: online-first)");
     return;
   }
   // WRITE-AHEAD, FIRST, INTO THE STAGED AREA. The turn is on disk (fsynced, atomic rename)
@@ -186,7 +186,7 @@ async function depositTurn(payload: Record<string, any>, event: string): Promise
     unstage(TOOL, item.client_id);
     resolveStaged(TOOL, null);
     if (pendingSelected) clearPending(conversation);
-    log("capture", "skip (not cloud-linked — local-only)");
+    log("capture", "skip (not cloud-linked: local-only)");
     return;
   }
   // Deposit with THIS tool's own credential (minted on first run) so the memory is
@@ -196,7 +196,7 @@ async function depositTurn(payload: Record<string, any>, event: string): Promise
     unstage(TOOL, item.client_id);
     resolveStaged(TOOL, null);
     if (pendingSelected) clearPending(conversation);
-    log("capture", "skip (local-only — no tool credential)");
+    log("capture", "skip (local-only: no tool credential)");
     return;
   }
   // Allowed: record the verdict on the turn and make it drainable, then settle orphans.

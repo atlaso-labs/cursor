@@ -228,7 +228,7 @@ export async function runConnect(): Promise<number> {
     } catch {
       /* best-effort */
     }
-    console.log(`Atlaso — authorize this device:\n  ${verifyUrl}`);
+    console.log(`Atlaso: authorize this device:\n  ${verifyUrl}`);
     openBrowser(verifyUrl);
 
     const code = await waitForCode(server, state, expiresIn * 1000);

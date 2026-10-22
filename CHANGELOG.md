@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.7] - 2026-10-22
+
+Memory arrives in a bounded block. The session-start memory block is now measured in bytes rather than characters, so notes in Chinese, Japanese or with emoji can no longer make it larger than 9,000 bytes. The recalled-memory block now stays under that budget: notes are added whole, most relevant first, a note's short form is used when the server sends one and only that fits, and a closing line says how many notes did not fit and that the Atlaso recall tool can show them. A recall that already fits prints exactly as before.
+
+Privacy: a password, API key, token or private key saved inside a note is replaced with a `[REDACTED:...]` marker before the note reaches the AI; the rest of the note is still shown.
+
 ## [0.2.6] - 2026-10-01
 
 Hooks never hold up a session. Session-start recall gives up after 2.5 s and hands Cursor the session context before it catches up on queued notes; every Atlaso hook now ends within 8 s (Cursor allows 50), and a queued note cut off mid-send is sent on a later turn. Each skip is counted on this device as a time, tool and reason, never any text, and `atlaso status` shows the count for the last 24 hours, with skipped recall and interrupted saving listed separately.

@@ -48,6 +48,9 @@ export interface RecallResult {
   /** ISO-8601 UTC; absent on older brains (rung 85bcf262 card B1). On a /v1/recall
    *  hit it is the statement time; on a /v1/memories row it is the INSERTION time. */
   created_at?: string | null;
+  /** The ranker's optional short form of `content` (the decision or fact itself);
+   *  the renderer prints it only when the full note does not fit the budget. */
+  short?: string | null;
   /** /v1/memories only: when the user stated the note (ISO-8601 UTC), null when
    *  unknown, absent on older brains. */
   stated_at?: string | null;
@@ -399,9 +402,25 @@ export async function remember(auth: Auth, opts: RememberOptions): Promise<strin
   return row?.id ?? client_id; // durable server id when settled, else the idempotency key
 }
 
-/** DELETE /v1/memories/<id>. Success = REACHED and 2xx (the body may be empty, so we
- *  don't route it through call()'s JSON parse). A verified 401/403 retires the token. */
-export async function forget(auth: Auth, id: string): Promise<boolean> {
+/** What the forget tool tells the model when the brain RECORDED the forget but has not
+ *  finished removing the memory (503 forget_pending; DXCritic 9a199bc2). Plain words, no
+ *  em dashes; the same sentence as atlaso_mcp.tools.FORGET_PENDING_NOTE (Python MCP) and
+ *  server/mcp_app.py (hosted MCP). */
+export const FORGET_PENDING_NOTE =
+  "Atlaso recorded this forget but has not finished removing the memory yet, so it " +
+  "may still be recalled for now. Wait a few seconds, then retry the same forget to " +
+  "finish it. Retrying is safe.";
+export const FORGET_FAILED_NOTE = "Not forgotten: the server was unreachable. Try again when connected.";
+
+/** Outcome of DELETE /v1/memories/<id>:
+ *  "forgotten": reached and 2xx (the body may be empty, so it never goes through call()'s JSON parse).
+ *  "pending":   a VERIFIED 503 (X-Atlaso-Response marker) with X-Atlaso-Error: forget_pending. The
+ *               brain recorded the forget but has not finished it; the same forget, retried, does.
+ *               A 503 without both markers (an edge page) is "failed", like any other transport error.
+ *  "failed":    offline, timeout or any other refusal. A verified 401/403 also retires the token. */
+export type ForgetOutcome = "forgotten" | "pending" | "failed";
+
+export async function forget(auth: Auth, id: string): Promise<ForgetOutcome> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), RECALL_TIMEOUT_MS);
   try {
@@ -410,13 +429,15 @@ export async function forget(auth: Auth, id: string): Promise<boolean> {
       headers: { Authorization: `Bearer ${auth.token}` },
       signal: ctrl.signal,
     });
+    const ours = res.headers?.get("x-atlaso-response") === "1";
     if (res.status === 401 || res.status === 403) {
-      if (res.headers?.get("x-atlaso-response") === "1") retireForAuth(auth);
-      return false;
+      if (ours) retireForAuth(auth);
+      return "failed";
     }
-    return res.ok;
+    if (res.status === 503 && ours && res.headers?.get("x-atlaso-error") === "forget_pending") return "pending";
+    return res.ok ? "forgotten" : "failed";
   } catch {
-    return false; // offline / transient — the memory stays; caller says "try again"
+    return "failed"; // offline / transient: the memory stays; caller says "try again"
   } finally {
     clearTimeout(timer);
   }

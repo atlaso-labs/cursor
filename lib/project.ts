@@ -358,8 +358,8 @@ function firstWorkspaceFolder(v: string | undefined): string | null {
  *  The MCP server is a standalone process — it gets no hook payload and its cwd is
  *  wherever the editor happened to launch it, so `projectKey()` alone would key
  *  memories to the wrong directory (or to none). Resolve the workspace from the env
- *  the editor exports, then hand it to the tri-state resolver so an unattributable
- *  root yields null rather than a junk key. */
+ *  the editor exports ONLY (see `currentProjectKey`), then hand it to the tri-state
+ *  resolver so an unattributable root yields null rather than a junk key. */
 /** Tri-state resolution for the CURRENT process. `currentProjectKey()` collapses
  *  'none' and 'unknown' to the same null, which is NOT the same thing: 'none' is a
  *  trustworthy "this is genuinely not a project" ($HOME, the filesystem root) and
@@ -393,12 +393,17 @@ function editorWorkspaceRoot(): string | null {
   );
 }
 
-function currentRoot(): string {
-  return editorWorkspaceRoot() || process.env.PWD || process.cwd();
-}
-
+/** Project key for the CURRENT process (the MCP server's recall/recent/remember scope),
+ *  or null for personal-only. Only a valid root the EDITOR supplied can name a project:
+ *  the inherited PWD and the process cwd are wherever the editor happened to be
+ *  launched (`cursor .` in repo B, then switched to repo A), so falling back to them
+ *  scoped recall to the wrong project (SecurityEngineer fcf41ff2 S4, CodeRedTeam
+ *  c2d2ddcc F2). Same tri-state resolver as `currentProjectResolution()`: anything but
+ *  'ok' (absent, relative, nonexistent, a file, tool-cache territory) is null. The hooks
+ *  resolve their own project from the hook payload (`workspaceRoot`) and are unaffected. */
 export function currentProjectKey(): string | null {
-  return projectKey(currentRoot());
+  const r = currentProjectResolution();
+  return r.status === "ok" ? r.key : null;
 }
 
 /** Visibility for a RECALL RESULT, as opposed to a raw tag list.

@@ -1,0 +1,4 @@
+# Test-only: every `bun test` run starts in a synthetic home (tests/setup-home.ts).
+# Not part of the plugin the CLI installs (cli/scripts/bundle-cursor.ts excludes it).
+[test]
+preload = ["./tests/setup-home.ts"]

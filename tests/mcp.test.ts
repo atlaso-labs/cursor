@@ -25,6 +25,14 @@ const server = Bun.serve({
     // created_at = INSERTION time (an L2 rewrite day); stated_at = when the user said it
     if (url.pathname === "/v1/memories" && req.method === "GET") return j({ deposits: [{ id: "m9", content: "recent one", created_at: "2026-09-25T03:00:00+00:00", stated_at: "2026-08-01T10:00:00+00:00" }] });
     if (url.pathname === "/v1/memories/batch") return j({ results: [{ client_id: body.items[0].client_id, status: "added", id: "new1" }] });
+    if (url.pathname === "/v1/memories/pend1" && req.method === "DELETE") {
+      // the brain's 503 forget_pending: recorded, not finished (server developer_api.forget_pending_error)
+      return new Response(JSON.stringify({ detail: { code: "forget_pending", retryable: true } }),
+        { status: 503, headers: { ...VERIFIED, "x-atlaso-error": "forget_pending", "retry-after": "2" } });
+    }
+    if (url.pathname === "/v1/memories/edge1" && req.method === "DELETE") {
+      return new Response("<html>busy</html>", { status: 503, headers: { "content-type": "text/html" } });
+    }
     if (url.pathname.startsWith("/v1/memories/") && req.method === "DELETE") return j({ ok: true });
     if (url.pathname === "/v1/health") return j({ fmi: 72, deposit_count: 128 });
     return j({ error: "not found" }, 404);
@@ -124,6 +132,20 @@ describe("tools/call routes to the brain with the per-tool credential", () => {
     const out = payload(await call("forget", { id: "m1" }));
     expect(out).toEqual({ forgotten: true, id: "m1" });
     expect(reqs.some((r) => r.method === "DELETE" && r.path === "/v1/memories/m1")).toBe(true);
+  });
+  test("forget on 503 forget_pending says recorded and to retry the same forget", async () => {
+    const out = payload(await call("forget", { id: "pend1" }));
+    expect(out).toEqual({
+      forgotten: false, id: "pend1", forget_pending: true, retryable: true,
+      note: "Atlaso recorded this forget but has not finished removing the memory yet, so it may still be recalled for now. Wait a few seconds, then retry the same forget to finish it. Retrying is safe.",
+    });
+    expect(out.note).not.toContain("\u2014");
+    expect(out.note.toLowerCase()).not.toContain("offline");
+  });
+  test("an unmarked 503 (edge page) is a plain failure, never 'recorded'", async () => {
+    const out = payload(await call("forget", { id: "edge1" }));
+    expect(out.forget_pending).toBeUndefined();
+    expect(out).toEqual({ forgotten: false, id: "edge1", note: "Not forgotten: the server was unreachable. Try again when connected." });
   });
   test("status reports fmi + total", async () => {
     const out = payload(await call("status"));

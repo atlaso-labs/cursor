@@ -71,7 +71,7 @@ describe("render", () => {
   test("a single note longer than the cap is replaced by a pointer to the recall tool", () => {
     const ctx = renderContext([{ content: "y".repeat(20000) }] as any);
     expect(ctx.length).toBeLessThanOrEqual(MAX_CONTEXT_CHARS);
-    expect(ctx).toContain("call the Atlaso `recall` tool");
+    expect(ctx).toContain("(1 more note did not fit here. The Atlaso recall tool can show them.)");
     expect(ctx).not.toContain("yyyy");
   });
   test("render prepends a notice when given one", () => {

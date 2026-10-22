@@ -55,9 +55,14 @@ describe("scrub", () => {
     expect(out).toContain("postgres://user:[REDACTED]@db.example.com/app");
   });
   test("redacts a high-entropy blob", () => {
+    // The server scrubber (now this plugin's, c2d2ddcc F1) reads the blob next to the
+    // label "token" as a label-adjacent credential before its high-entropy catch-all.
     const [out, kinds] = scrub("token aZ9xQ2wE7rT4yU6iO1pL8kJ3hG5fD0sA7zX2cV4bN");
-    expect(kinds).toContain("high_entropy");
-    expect(out).toContain("[REDACTED:high_entropy]");
+    expect(kinds).toContain("label_adjacent_blob");
+    expect(out).toBe("token [REDACTED]");
+    const [bare, bareKinds] = scrub("blob aZ9xQ2wE7rT4yU6iO1pL8kJ3hG5fD0sA7zX2cV4bN");
+    expect(bareKinds).toContain("high_entropy");
+    expect(bare).toContain("[REDACTED:high_entropy]");
   });
   test("redacts a quoted secret value with spaces", () => {
     expect(scrub('PASSWORD="correct horse battery staple"')[0]).toBe("PASSWORD=[REDACTED]");
