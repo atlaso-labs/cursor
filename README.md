@@ -8,6 +8,9 @@ engine stays on the server (the IP thin-client rule, in TypeScript). **No uv, no
 Python, no vendored runtime, no build step** — Cursor ships bun, and a plugin is
 just files.
 
+## Why this exists
+Cursor removed its Memories feature in 2.1, and Rules only hold what you type into them. This connector captures your codebase conventions, stack decisions and review preferences as you work in Cursor and brings them back through a generated rules file, so the rules you would otherwise retype are already there, and the same memory is in Claude Code and Codex. [How it works](https://www.atlaso.ai/for/cursor) · [Docs](https://docs.atlaso.ai/tools/cursor)
+
 ## One plugin, three surfaces (today)
 
 Cursor (2.5+) has a real plugin format + Marketplace. `.cursor-plugin/plugin.json`
